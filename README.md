@@ -18,7 +18,7 @@ Arquivo único, sem instalação. Execute e aceite o pedido de administrador.
 |---|---|
 | **Cartão → Imagem** | Backup exato do cartão em um arquivo `.img` |
 | **Imagem → Cartão** | Grava a imagem do sistema (`.img`, `.iso`, `.bin`) no cartão, com verificação |
-| **Cartão → Cartão** | Clona um cartão direto em outro (o destino pode ser maior) |
+| **Cartão → Cartão** | Clona um cartão direto em outro; com "copiar só os dados", o destino pode até ser **menor** que a origem, se os dados couberem |
 | **Verificar cartão** | Procura setores ruins, compara com uma imagem e testa a capacidade real |
 | **Recuperar cartão** | **Repara cartão sem acesso ou com capacidade errada**: diagnostica e explica o problema, mostra e copia arquivos de partições que o Windows não vê (ext4 de consoles), reconstrói partições perdidas sem apagar dados, recupera arquivos apagados e restaura o cartão |
 | **Autenticidade** | Descobre se o cartão é verdadeiro ou falso: marca, fabricante registrado, capacidade real e velocidade |

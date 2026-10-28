@@ -43,7 +43,11 @@ Grava um arquivo `.img`, `.iso` ou `.bin` no cartão. **Apaga todo o conteúdo d
 
 ### Cartão → Cartão
 Clona direto de um cartão para outro. **Apaga todo o conteúdo do destino.**
-- Escolha origem e destino. O destino deve ser **igual ou maior** que a origem. Se for maior, o espaço extra fica sem partição.
+- Escolha origem e destino. Normalmente o destino deve ser **igual ou maior** que a origem. Se for maior, o espaço extra fica sem partição.
+- **Copiar só os dados (destino menor):** marque a opção quando o destino for menor mas os dados caibam nele. O app analisa a origem e escolhe sozinho:
+  - se as **partições** ocupam menos que o destino (ex.: imagem de 8 GB em cartão de 64 GB), copia exatamente só essa área (cópia fiel, serve para sistemas de consoles);
+  - se a partição é **maior que o destino** mas tem uma única partição FAT/exFAT, formata o destino e copia os **arquivos** (datas e atributos não são preservados; não serve para cartão bootável);
+  - cartões com ext4/Linux ou GPT que não cabem no destino não podem ser reduzidos com segurança; o app explica e não altera nada.
 - Dica: com um só leitor, use Cartão → Imagem e depois Imagem → Cartão.
 
 ### Verificar cartão

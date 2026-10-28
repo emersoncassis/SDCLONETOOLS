@@ -345,7 +345,10 @@ static int EntCmp(const void *a, const void *b) {
     return _stricmp(x->name, y->name);
 }
 
-static void BrSetInfo(const wchar_t *t) { SetWindowTextW(GetDlgItem(B->hw, ID_BR_INFO), t); }
+static void BrSetInfo(const wchar_t *t) {
+    if (B->hw) SetWindowTextW(GetDlgItem(B->hw, ID_BR_INFO), t);
+    else SetPhaseText(t);
+}
 
 static void BrPathText(void) {
     wchar_t p[1200], t[300];
@@ -444,16 +447,17 @@ static void BrProgress(BOOL force) {
 static int CopySink(void *ctx, const uint8_t *p, uint32_t n) {
     HANDLE h = (HANDLE)ctx;
     DWORD w = 0;
-    if (B->cancel) return 1;
+    if (B->cancel || g_cancel) return 1;
     if (!WriteFile(h, p, n, &w, NULL) || w != n) return -1;
     B->bytes += n;
+    g_done = (LONGLONG)B->bytes;
     BrProgress(FALSE);
     return 0;
 }
 
 static void CopyEntry(const FsEntry *e, const wchar_t *dir, int depth) {
     wchar_t nm[300], full[MAX_PATH];
-    if (B->cancel) return;
+    if (B->cancel || g_cancel) return;
     U8W(e->name, nm, 300);
     SanitizeName(nm);
     if (e->kind == K_DIR) {
@@ -472,7 +476,7 @@ static void CopyEntry(const FsEntry *e, const wchar_t *dir, int depth) {
             B->fail++;
             return;
         }
-        for (int i = 0; i < n && !B->cancel; i++) CopyEntry(&arr[i], full, depth + 1);
+        for (int i = 0; i < n && !B->cancel && !g_cancel; i++) CopyEntry(&arr[i], full, depth + 1);
         free(arr);
         B->dirs++;
     } else if (e->kind == K_FILE) {
@@ -789,6 +793,160 @@ static void ShowBrowser(void) {
     Dev2Free(&br.d);
     CloseHandle(br.hd);
     B = NULL;
+}
+
+
+/* ===================== CÓPIA INTELIGENTE (só os dados; destino pode ser menor) ===================== */
+static BOOL WalkTotals(Fs *fs, const FsEntry *dir, int depth, uint64_t *bytes, uint64_t *files) {
+    FsEntry *arr = NULL;
+    int n = 0;
+    if (depth > 40) return TRUE;
+    if (FsList(fs, dir, &arr, &n) != 0) return FALSE;
+    BOOL ok = TRUE;
+    for (int i = 0; i < n && ok && !g_cancel; i++) {
+        if (arr[i].kind == K_DIR) ok = WalkTotals(fs, &arr[i], depth + 1, bytes, files);
+        else if (arr[i].kind == K_FILE) { *bytes += arr[i].size; (*files)++; }
+    }
+    free(arr);
+    return ok;
+}
+
+static int FindLetterOfDisk(int disk) {
+    for (int t = 0; t < 40; t++) {
+        DWORD mask = GetLogicalDrives();
+        for (int i = 2; i < 26; i++)
+            if ((mask & (1u << i)) && DiskOfLetter((wchar_t)(L'A' + i)) == disk) return i;
+        Sleep(500);
+    }
+    return -1;
+}
+
+static BOOL DoSmartCopy(Job *j) {
+    BOOL ok = FALSE;
+    HANDLE hs = OpenDisk(j->src, FALSE), hd = INVALID_HANDLE_VALUE;
+    Dev2 d;
+    int haveDev = 0;
+    VolSet vs;
+    Diag *g = &g_diag;
+    wchar_t msg[1600], a[32], b[32], c[32];
+    vs.n = 0;
+    if (j->src == g_sysDisk || j->dst == g_sysDisk) { Log(L"ERRO: disco do sistema — recusado."); goto done; }
+    if (hs == INVALID_HANDLE_VALUE) { LogErr(L"abrir o cartão de origem"); goto done; }
+    if (!DiskLenMatches(hs, j->srcSize)) { Log(L"ERRO: o tamanho do disco de origem mudou. Atualize a lista."); goto done; }
+    if (!Dev2Init(&d, StrictRd, hs, j->srcSize, j->srcSec)) { Log(L"ERRO: memória insuficiente."); goto done; }
+    haveDev = 1;
+    Log(L"Cópia inteligente: analisando o conteúdo do Disco %d (somente leitura)...", j->src);
+    SetIndet(L"Analisando o cartão de origem...");
+    DiagAnalyze(&d, g, 0, NULL, NULL);
+    if (g->tableType == TBL_GPT || g->tableType == TBL_NONE) {
+        Log(L"Não é possível usar a cópia inteligente: o cartão de origem %ls.", g->tableType == TBL_GPT ? L"usa GPT" : L"não tem tabela de partições reconhecível");
+        SetSummary(MB_ICONWARNING, L"A cópia só de dados não funciona com este cartão (%ls).\n\nUse um destino do mesmo tamanho ou maior na cópia normal, ou 'Ver / copiar arquivos' para salvar os arquivos no PC.", g->tableType == TBL_GPT ? L"GPT" : L"sem tabela de partições");
+        goto done;
+    }
+    /* fim da última partição (inclui a estendida) */
+    uint64_t endMax = 0;
+    int nReal = 0, realIdx = -1, nLogical = 0;
+    for (int i = 0; i < g->nparts; i++) {
+        const Part *p = &g->parts[i];
+        if (p->start + p->size > endMax) endMax = p->start + p->size;
+        if (!(p->flags & PF_EXTENDED)) { nReal++; realIdx = i; }
+        if (p->src == SRC_LOGICAL) nLogical++;
+    }
+    (void)nLogical;
+    FmtSize(endMax, a, 32); FmtSize(j->srcSize, b, 32); FmtSize(j->dstSize, c, 32);
+    Log(L"As partições do cartão de origem ocupam %ls dos %ls. O destino tem %ls.", a, b, c);
+    if (g->tableType == TBL_MBR && endMax <= j->dstSize && !(g->verdict & (V_BEYOND))) {
+        /* as partições cabem no destino: cópia exata só da área usada pelas partições */
+        uint64_t len = ((endMax + j->srcSec - 1) / j->srcSec) * j->srcSec;
+        Dev in, out;
+        uint64_t diff = 0, first = 0, bad2 = 0;
+        Log(L"As partições cabem no destino: copiando exatamente os primeiros %ls (cópia fiel, inclusive partições Linux).", a);
+        if (!LockDiskVolumes(j->dst, &vs)) goto done;
+        hd = OpenDisk(j->dst, TRUE);
+        if (hd == INVALID_HANDLE_VALUE) { LogErr(L"abrir o cartão de destino para escrita"); goto done; }
+        if (!DiskLenMatches(hd, j->dstSize)) { Log(L"ERRO: o tamanho do disco de destino mudou. Atualize a lista."); goto done; }
+        in.h = hs; in.raw = TRUE; in.sec = j->srcSec;
+        out.h = hd; out.raw = TRUE; out.sec = j->dstSec;
+        g_bad = 0;
+        ok = CopyDev(&in, &out, len, j->verify ? L"Copiando a área usada (1/2)" : L"Copiando a área usada", &g_bad);
+        if (ok) FlushFileBuffers(hd);
+        if (ok && j->verify) {
+            ok = CompareDev(&in, &out, len, L"Verificando a cópia (2/2)", &diff, &first, &bad2);
+            if (ok) { ReportCompare(diff, first, bad2); if (diff || bad2) ok = FALSE; }
+        }
+        UpdateDiskProps(hd);
+        if (ok) SetSummary(MB_ICONINFORMATION, L"Copiado: %ls (toda a área usada pelas partições) para o cartão de destino%ls.\n\nSe o Windows pedir para formatar o disco, clique em Cancelar.", a, j->verify ? L", e verificado" : L"");
+        goto done;
+    }
+    /* as partições não cabem: cópia por arquivos (FAT/exFAT com uma única partição) */
+    if (g->tableType != TBL_MBR || nReal != 1 || !(g->parts[realIdx].fs == FST_FAT12 || g->parts[realIdx].fs == FST_FAT16 || g->parts[realIdx].fs == FST_FAT32 || g->parts[realIdx].fs == FST_EXFAT)) {
+        Log(L"Não é possível copiar para um destino menor: o cartão tem %d partição(ões) e a(s) partição(ões) ultrapassam o tamanho do destino. A cópia por arquivos só funciona com UMA partição FAT/exFAT.", nReal);
+        SetSummary(MB_ICONWARNING, L"O destino é menor do que a área ocupada pelas partições do cartão de origem (%ls), e a cópia por arquivos só funciona quando o cartão tem uma única partição FAT/exFAT.\n\nSistemas Linux (ext4) não podem ser reduzidos de forma segura. Use um destino igual ou maior, ou 'Ver / copiar arquivos' para salvar os arquivos no PC.", a);
+        goto done;
+    }
+    {
+        Fs fs;
+        const Part *sp = &g->parts[realIdx];
+        uint64_t tot = 0, nf = 0;
+        char label[16] = "SDCARD";
+        if (!FsOpen(&fs, &d, sp->start)) { Log(L"ERRO: não foi possível abrir o sistema de arquivos da origem."); goto done; }
+        Log(L"A partição é %ls. Contando os dados que precisam ser copiados...", FsNameW(sp->fs));
+        FsEntry root;
+        FsRoot(&fs, &root);
+        if (!WalkTotals(&fs, &root, 0, &tot, &nf)) { FsClose(&fs); if (!g_cancel) Log(L"ERRO: não foi possível ler todas as pastas do cartão de origem."); goto done; }
+        if (g_cancel) { FsClose(&fs); goto done; }
+        FmtSize(tot, a, 32);
+        /* espaço do destino: descontando as estruturas do sistema de arquivos */
+        if (tot > j->dstSize - j->dstSize / 20) {
+            Log(L"Os dados (%ls, %I64u arquivos) não cabem no destino (%ls).", a, (unsigned long long)nf, c);
+            SetSummary(MB_ICONWARNING, L"Os dados do cartão de origem (%ls) NÃO cabem no destino (%ls).\n\nApague arquivos da origem ou use um cartão maior.", a, c);
+            FsClose(&fs);
+            goto done;
+        }
+        {
+            int ci = 0;
+            if (sp->label[0]) for (const char *q = sp->label; *q && ci < 11; q++) if (isalnum((unsigned char)*q) || *q == '_' || *q == '-') label[ci++] = (char)toupper((unsigned char)*q);
+            if (ci) label[ci] = 0;
+        }
+        const char *dfs = (sp->fs == FST_EXFAT || j->dstSize > 34359738368ULL) ? "exfat" : "fat32";
+        msg[0] = 0;
+        Cat(msg, 1600, L"Cópia por ARQUIVOS (o destino é menor que a origem):\n\n• Dados a copiar: %ls em %I64u arquivos\n• O destino será APAGADO e formatado em %ls\n• Datas e atributos dos arquivos não são preservados; o cartão NÃO fica bootável se a origem era bootável\n\nContinuar?", a, (unsigned long long)nf, dfs[0] == 'e' ? L"exFAT" : L"FAT32");
+        if (SendMessageW(g_hwnd, WM_APP_ASK, 0, (LPARAM)msg) != IDYES) {
+            Log(L"Cancelado pelo usuário. Nada foi alterado.");
+            SetSummary(MB_ICONINFORMATION, L"Cancelado. Nada foi alterado.");
+            FsClose(&fs);
+            goto done;
+        }
+        if (!FormatDisk(j->dst, dfs, label)) { FsClose(&fs); goto done; }
+        int li = FindLetterOfDisk(j->dst);
+        if (li < 0) { Log(L"ERRO: o destino foi formatado, mas o Windows não atribuiu uma letra de unidade. Reinsira o cartão e use 'Ver / copiar arquivos' ou copie manualmente."); FsClose(&fs); goto done; }
+        wchar_t drv[4] = {(wchar_t)(L'A' + li), L':', 0, 0};
+        Log(L"Destino formatado e montado em %ls. Copiando %ls...", drv, a);
+        SetPhase(L"Copiando arquivos para o destino", tot);
+        Br br;
+        memset(&br, 0, sizeof br);
+        B = &br;
+        br.fs = fs; br.fsOk = 1;
+        FsEntry *arr = NULL;
+        int n = 0;
+        if (FsList(&fs, &root, &arr, &n) != 0) { Log(L"ERRO: não foi possível ler a raiz da origem."); B = NULL; FsClose(&fs); goto done; }
+        for (int i = 0; i < n && !g_cancel; i++) CopyEntry(&arr[i], drv, 0);
+        free(arr);
+        BrProgress(TRUE);
+        B = NULL;
+        FsClose(&fs);
+        FmtSize(br.bytes, b, 32);
+        Log(L"Cópia %ls: %d arquivo(s), %d pasta(s), %ls; %d falha(s), %d item(ns) ignorado(s).", g_cancel ? L"cancelada" : L"concluída", br.files, br.dirs, b, br.fail, br.skipped);
+        ok = !g_cancel && br.fail == 0;
+        if (!g_cancel) SetSummary(br.fail ? MB_ICONWARNING : MB_ICONINFORMATION, L"Cópia por arquivos concluída: %d arquivo(s), %d pasta(s), %ls.\n%d falha(s) (veja o registro).\n\nDestino: %ls", br.files, br.dirs, b, br.fail, drv);
+    }
+done:
+    if (hd != INVALID_HANDLE_VALUE) CloseHandle(hd);
+    UnlockVolumes(&vs);
+    if (haveDev) Dev2Free(&d);
+    if (hs != INVALID_HANDLE_VALUE) CloseHandle(hs);
+    if (!ok && g_summary[0] == 0) SetSummary(MB_ICONERROR, L"A cópia não foi concluída com sucesso. Veja o registro.");
+    return ok;
 }
 
 #endif

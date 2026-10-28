@@ -1300,35 +1300,40 @@ static BOOL RunHidden(wchar_t *cmd, DWORD *exitCode) {
     return TRUE;
 }
 
-static BOOL DoRestore(Job *j) {
-    BOOL ok = FALSE;
+static BOOL FormatDisk(int disk, const char *fs, const char *label) {
     wchar_t tmpdir[MAX_PATH], tmp[MAX_PATH], cmd[MAX_PATH + 64];
-    char script[600];
-    const char *fs = j->srcSize <= 34359738368ULL ? "fat32" : "exfat";
+    char script[700];
     HANDLE hf;
     DWORD w, code = 1;
-    if (j->src == g_sysDisk) { Log(L"ERRO: disco do sistema — recusado."); goto done; }
-    SetIndet(L"Restaurando o cartão (limpar, particionar e formatar)...");
+    SetIndet(L"Formatando o cartão (limpar, particionar e formatar)...");
     _snprintf(script, sizeof script - 1,
-              "select disk %d\r\nattributes disk clear readonly noerr\r\nclean\r\ncreate partition primary\r\nformat fs=%s quick label=SDCARD\r\nassign\r\nexit\r\n",
-              j->src, fs);
+              "select disk %d\r\nattributes disk clear readonly noerr\r\nclean\r\ncreate partition primary\r\nformat fs=%s quick label=%s\r\nassign\r\nexit\r\n",
+              disk, fs, label);
     script[sizeof script - 1] = 0;
     GetTempPathW(MAX_PATH, tmpdir);
     GetTempFileNameW(tmpdir, L"scd", 0, tmp);
     hf = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hf == INVALID_HANDLE_VALUE) { LogErr(L"criar script temporário"); goto done; }
+    if (hf == INVALID_HANDLE_VALUE) { LogErr(L"criar script temporário"); return FALSE; }
     WriteFile(hf, script, (DWORD)strlen(script), &w, NULL);
     CloseHandle(hf);
-    Log(L"Restaurando o Disco %d com %ls (rápido). Aguarde, não remova o cartão...", j->src, fs[0] == 'f' ? L"FAT32" : L"exFAT (cartão acima de 32 GB)");
+    Log(L"Formatando o Disco %d com %ls (rápido). Aguarde, não remova o cartão...", disk, fs[0] == 'f' ? L"FAT32" : L"exFAT");
     _snwprintf(cmd, MAX_PATH + 63, L"diskpart.exe /s \"%ls\"", tmp);
     cmd[MAX_PATH + 63] = 0;
-    if (!RunHidden(cmd, &code)) { LogErr(L"executar o diskpart"); DeleteFileW(tmp); goto done; }
+    if (!RunHidden(cmd, &code)) { LogErr(L"executar o diskpart"); DeleteFileW(tmp); return FALSE; }
     DeleteFileW(tmp);
-    ok = (code == 0);
+    if (code != 0) Log(L"ERRO: o diskpart terminou com código %lu. Veja as mensagens acima.", (unsigned long)code);
+    return code == 0;
+}
+
+static BOOL DoRestore(Job *j) {
+    BOOL ok = FALSE;
+    const char *fs = j->srcSize <= 34359738368ULL ? "fat32" : "exfat";
+    if (j->src == g_sysDisk) { Log(L"ERRO: disco do sistema — recusado."); goto done; }
+    ok = FormatDisk(j->src, fs, "SDCARD");
     if (ok) {
         Log(L"Restauração concluída. O cartão foi reparticionado e formatado com o nome SDCARD.");
         SetSummary(MB_ICONINFORMATION, L"Cartão restaurado e formatado (%ls, nome SDCARD).\n\nSe ele ainda mostrar capacidade menor que a esperada, use Autenticidade: pode ser um cartão falso.", fs[0] == 'f' ? L"FAT32" : L"exFAT");
-    } else Log(L"ERRO: o diskpart terminou com código %lu. Veja as mensagens acima.", (unsigned long)code);
+    }
 done:
     if (!ok && g_summary[0] == 0) SetSummary(MB_ICONERROR, L"Não foi possível restaurar o cartão. Veja o registro.");
     return ok;
@@ -1345,7 +1350,7 @@ static DWORD WINAPI Worker(LPVOID p) {
     switch (j->op) {
     case OP_C2I: ok = DoCardToImage(j); break;
     case OP_I2C: ok = DoImageToCard(j); break;
-    case OP_C2C: ok = DoCardToCard(j); break;
+    case OP_C2C: ok = j->mode ? DoSmartCopy(j) : DoCardToCard(j); break;
     case OP_VERIFY: ok = (j->mode == 2) ? DoCapacity(j) : DoVerify(j); break;
     case OP_RECOVER:
         switch (j->mode) {
@@ -1442,7 +1447,7 @@ static void ApplyOp(int op) {
     ShowCtl(ID_EDITFILE, op != OP_C2C && op != OP_AUTH);
     ShowCtl(ID_BROWSE, op != OP_C2C && op != OP_AUTH);
     ShowCtl(ID_CHK1, op <= OP_VERIFY || op == OP_AUTH);
-    ShowCtl(ID_CHK2, op == OP_VERIFY);
+    ShowCtl(ID_CHK2, op == OP_VERIFY || op == OP_C2C);
     ShowCtl(ID_RADA, FALSE);
     ShowCtl(ID_RADB, FALSE);
     EnableCtl(ID_CHK1, TRUE);
@@ -1464,6 +1469,7 @@ static void ApplyOp(int op) {
         SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão de origem:");
         SetDlgItemTextW(g_hwnd, ID_LBL2, L"Cartão de destino (SERÁ APAGADO):");
         SetDlgItemTextW(g_hwnd, ID_CHK1, L"Verificar depois de copiar (recomendado)");
+        SetDlgItemTextW(g_hwnd, ID_CHK2, L"Copiar só os dados (o destino pode ser MENOR que a origem)");
         SetChk(ID_CHK1, TRUE);
         break;
     case OP_VERIFY:
@@ -1606,7 +1612,11 @@ static void OnStart(void) {
         if (!t) { Warn(L"Selecione o cartão de destino."); return; }
         if (t->index == g_sysDisk) { Warn(L"O destino é o disco do sistema. Operação recusada."); return; }
         if (t->index == s->index) { Warn(L"Origem e destino são o mesmo cartão."); return; }
-        if (t->size < s->size) { Warn(L"O cartão de destino é MENOR que o de origem."); return; }
+        j->mode = c2 ? 1 : 0;
+        if (t->size < s->size && !j->mode) {
+            Warn(L"O cartão de destino é MENOR que o de origem.\n\nSe os DADOS cabem no destino, marque a opção \"Copiar só os dados (o destino pode ser MENOR que a origem)\" e tente de novo.");
+            return;
+        }
         _snwprintf(msg, 1799, L"Copiar:\n%ls\n\npara:\n%ls\n\nTODO O CONTEÚDO DO DESTINO SERÁ APAGADO. Continuar?", s->label, t->label);
         if (!Confirm(msg)) return;
         j->dst = t->index; j->dstSize = t->size; j->dstSec = t->sec;
