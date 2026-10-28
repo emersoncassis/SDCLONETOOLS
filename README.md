@@ -20,8 +20,17 @@ Arquivo único, sem instalação. Execute e aceite o pedido de administrador.
 | **Imagem → Cartão** | Grava a imagem do sistema (`.img`, `.iso`, `.bin`) no cartão, com verificação |
 | **Cartão → Cartão** | Clona um cartão direto em outro (o destino pode ser maior) |
 | **Verificar cartão** | Procura setores ruins, compara com uma imagem e testa a capacidade real |
-| **Recuperar cartão** | Recupera fotos, vídeos e PDFs apagados; restaura cartão RAW ou travado |
+| **Recuperar cartão** | **Repara cartão sem acesso ou com capacidade errada**: diagnostica e explica o problema, mostra e copia arquivos de partições que o Windows não vê (ext4 de consoles), reconstrói partições perdidas sem apagar dados, recupera arquivos apagados e restaura o cartão |
 | **Autenticidade** | Descobre se o cartão é verdadeiro ou falso: marca, fabricante registrado, capacidade real e velocidade |
+
+### Cartão de 128 GB aparecendo com poucos MB? Cartão "sem acesso"?
+
+Use **Recuperar cartão → Diagnosticar**. O app lê o cartão sem alterar nada e diz qual é o caso:
+
+- **o próprio cartão informa pouca capacidade** (controlador com defeito ou cartão falso): não é partição, não tem conserto por software comum, e o app explica isso;
+- **partições cobrindo só parte do cartão** (imagem pequena gravada em cartão grande): os dados estão intactos e o espaço pode ser recuperado;
+- **partições Linux que o Windows não lê** (normal em R36S, ArkOS, JELOS): o app abre e copia esses arquivos;
+- **tabela de partições apagada** (cartão "RAW"): o app encontra as partições e reconstrói a tabela sem apagar nada.
 
 ### Por que a Autenticidade importa
 
@@ -58,11 +67,14 @@ C puro com a API Win32, sem dependências. Precisa de Python e do compilador Zig
 
 Isso gera `SDCloneTools.exe` (64 bits) e `SDCloneTools32.exe`.
 
-Para testar o motor de recuperação de arquivos (em Linux):
+Testes automatizados (em Linux):
 
 ```sh
-gcc -O1 -o test_core test_core.c && ./test_core
+gcc -O1 -o test_core test_core.c && ./test_core   # recuperação de arquivos apagados
+sudo python3 tests/run_tests.py                    # leitores de FAT/exFAT/ext4 e diagnóstico (imagens reais)
 ```
+
+O segundo precisa de `dosfstools mtools exfatprogs exfat-fuse e2fsprogs fdisk`.
 
 ## Estrutura
 
@@ -70,7 +82,10 @@ gcc -O1 -o test_core test_core.c && ./test_core
 |---|---|
 | `sdclone.c` | Interface Win32 e operações de disco |
 | `core.h` | Motor de recuperação, padrão do teste de capacidade e tabela de fabricantes |
-| `test_core.c` | Teste automatizado do motor de recuperação |
+| `fsread.h` | Leitura somente leitura de FAT12/16/32, exFAT e ext2/3/4 |
+| `diag.h` | Diagnóstico de MBR/GPT, partições perdidas e reconstrução do MBR |
+| `repair.h` | Diagnóstico, reconstrução e navegador de arquivos na interface |
+| `test_core.c`, `fstest.c`, `tests/` | Testes automatizados |
 | `sdclone.rc`, `sdclone.manifest`, `sdclone.ico`, `mkicon.py` | Ícone e manifesto (exige administrador) |
 | `build.sh` | Script de compilação |
 | `docs/USO.md` | Guia de uso completo |

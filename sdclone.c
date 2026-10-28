@@ -13,6 +13,8 @@
 #include <stdarg.h>
 #include <wchar.h>
 #include "core.h"
+#include "diag.h"
+#define HDR 40
 
 #define APP_TITLE L"SDCLONETOOLS"
 #define CHUNK (4u * 1024 * 1024)
@@ -27,7 +29,8 @@ enum {
     ID_OP0 = 100, /* 100..105 */
     ID_DESC = 120, ID_LBL1, ID_COMBO1, ID_REFRESH, ID_SHOWALL, ID_LBL2, ID_COMBO2, ID_COMBOB, ID_COMBOC,
     ID_LBLFILE, ID_EDITFILE, ID_BROWSE, ID_CHK1, ID_CHK2, ID_RADA, ID_RADB,
-    ID_START, ID_CANCELBTN, ID_PROGRESS, ID_STATUS, ID_LOG, ID_HEADER
+    ID_START, ID_CANCELBTN, ID_PROGRESS, ID_STATUS, ID_LOG, ID_HEADER,
+    ID_BR_PART = 300, ID_BR_LBL, ID_BR_PATH, ID_BR_LIST, ID_BR_INFO, ID_BR_UP, ID_BR_COPYSEL, ID_BR_COPYALL, ID_BR_CANCEL, ID_BR_CLOSE
 };
 
 /* ------------------------------------------------------------------ dados */
@@ -68,7 +71,7 @@ static volatile LONG g_indet = 0;
 static ULONGLONG g_t0 = 0;
 static wchar_t g_phase[200];
 static CRITICAL_SECTION g_cs;
-static wchar_t g_summary[1400];
+static wchar_t g_summary[2400];
 static UINT g_summaryIcon = MB_ICONINFORMATION;
 static DiskInfo g_disks[32];
 static int g_ndisks = 0, g_sysDisk = -1;
@@ -200,8 +203,8 @@ static void DrawButton(DRAWITEMSTRUCT *d) {
         tr.top = (tr.bottom - th) / 2;
         tr.bottom = tr.top + th;
         Txt(dc, t, &tr, DT_WORDBREAK | DT_CENTER, on ? RGB(235, 248, 255) : (dis ? CL_DIM : CL_TXT), g_fontB);
-    } else if (id == ID_START || id == ID_CANCELBTN || id == ID_REFRESH || id == ID_BROWSE) {
-        BOOL isStart = (id == ID_START), isCancel = (id == ID_CANCELBTN);
+    } else if (id == ID_START || id == ID_CANCELBTN || id == ID_REFRESH || id == ID_BROWSE || (id >= ID_BR_UP && id <= ID_BR_CLOSE)) {
+        BOOL isStart = (id == ID_START), isCancel = (id == ID_CANCELBTN || id == ID_BR_CANCEL);
         COLORREF fill, border, tc;
         if (isStart) {
             fill = dis ? CL_EDGE : (sel ? RGB(0, 140, 190) : (hot ? RGB(80, 230, 255) : CL_NEON));
@@ -419,9 +422,9 @@ static void SetIndet(const wchar_t *p) { SetPhaseText(p); g_done = 0; g_total = 
 static void SetSummary(UINT icon, const wchar_t *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    _vsnwprintf(g_summary, 1399, fmt, ap);
+    _vsnwprintf(g_summary, 2399, fmt, ap);
     va_end(ap);
-    g_summary[1399] = 0;
+    g_summary[2399] = 0;
     g_summaryIcon = icon;
 }
 
@@ -1331,6 +1334,8 @@ done:
     return ok;
 }
 
+#include "repair.h"
+
 static DWORD WINAPI Worker(LPVOID p) {
     Job *j = &g_job;
     BOOL ok = FALSE;
@@ -1342,7 +1347,15 @@ static DWORD WINAPI Worker(LPVOID p) {
     case OP_I2C: ok = DoImageToCard(j); break;
     case OP_C2C: ok = DoCardToCard(j); break;
     case OP_VERIFY: ok = (j->mode == 2) ? DoCapacity(j) : DoVerify(j); break;
-    case OP_RECOVER: ok = (j->mode == 1) ? DoRestore(j) : DoRecover(j); break;
+    case OP_RECOVER:
+        switch (j->mode) {
+        case RM_DIAG: ok = DoDiagnose(j, FALSE); break;
+        case RM_BROWSE: ok = DoDiagnose(j, TRUE); break;
+        case RM_REBUILD: ok = DoRebuild(j); break;
+        case RM_CARVE: ok = DoRecover(j); break;
+        default: ok = DoRestore(j); break;
+        }
+        break;
     case OP_AUTH: ok = DoAuth(j); break;
     }
     Log(ok ? L"=== Fim: concluído ===" : L"=== Fim: não concluído ===");
@@ -1354,13 +1367,55 @@ static DWORD WINAPI Worker(LPVOID p) {
 static void ShowCtl(int id, BOOL s) { ShowWindow(Ctl(id), s ? SW_SHOW : SW_HIDE); }
 static void EnableCtl(int id, BOOL e) { EnableWindow(Ctl(id), e); }
 
+static void UpdateEnable(void);
+static int RecoverMode(void) {
+    int i = (int)SendMessageW(Ctl(ID_COMBOB), CB_GETCURSEL, 0, 0);
+    return i < 0 ? 0 : i;
+}
+
+static const wchar_t *RECOVER_MODES[] = {
+    L"1. Diagnosticar o cartão: descobrir o que há de errado (não altera nada)",
+    L"2. Ver / copiar arquivos, inclusive de partições que o Windows não vê",
+    L"3. Reconstruir partições perdidas (cartão sem acesso/RAW; preserva os dados)",
+    L"4. Recuperar arquivos apagados (fotos, vídeos MP4/MOV, PDF)",
+    L"5. Restaurar o cartão: apaga TUDO e formata de novo (devolve a capacidade total)"};
+static const wchar_t *RECOVER_DESC[] = {
+    L"Analisa o cartão sem alterar nada: capacidade informada, tabela de partições, sistemas de arquivos e partições perdidas. Explica por que o cartão mostra pouca capacidade ou fica sem acesso, e o que fazer.",
+    L"Abre as partições do cartão (FAT, exFAT, ext4 de consoles Linux), inclusive as que o Windows não mostra, e permite copiar os arquivos para o PC. Somente leitura.",
+    L"Reescreve a tabela de partições (MBR) usando as partições encontradas no cartão. NÃO apaga dados. Guarda uma cópia do início do cartão em Documentos antes de alterar.",
+    L"Procura no cartão inteiro fotos (JPG/PNG), vídeos (MP4/MOV) e PDFs apagados e os salva numa pasta do PC. Só lê o cartão.",
+    L"Apaga tudo, cria uma partição do tamanho total e formata (FAT32 até 32 GB, exFAT acima). Use depois de salvar os dados; não conserta cartão que informa capacidade errada."};
+
+static void RecoverUi(void) {
+    int m = RecoverMode();
+    BOOL f = (m == RM_CARVE);
+    ShowCtl(ID_LBLFILE, f);
+    ShowCtl(ID_EDITFILE, f);
+    ShowCtl(ID_BROWSE, f);
+    if (m >= 0 && m < RM_COUNT) SetDlgItemTextW(g_hwnd, ID_DESC, RECOVER_DESC[m]);
+    UpdateEnable();
+}
+
+static void FillModeCombo(int op) {
+    HWND c = Ctl(ID_COMBOB);
+    SendMessageW(c, CB_RESETCONTENT, 0, 0);
+    if (op == OP_RECOVER) {
+        for (int i = 0; i < RM_COUNT; i++) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)RECOVER_MODES[i]);
+        MoveWindow(c, S(10), S(168 + HDR), S(620), S(240), TRUE);
+    } else {
+        for (int i = 0; i < NBRANDS; i++) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)BRANDS[i].name);
+        MoveWindow(c, S(10), S(168 + HDR), S(300), S(240), TRUE);
+    }
+    SendMessageW(c, CB_SETCURSEL, 0, 0);
+}
+
 static void UpdateEnable(void) {
     BOOL fileOn = TRUE;
     if (g_op == OP_VERIFY) {
         if (Checked(ID_CHK2)) SetChk(ID_CHK1, FALSE);
         EnableCtl(ID_CHK1, !Checked(ID_CHK2));
         fileOn = Checked(ID_CHK1) && !Checked(ID_CHK2);
-    } else if (g_op == OP_RECOVER) fileOn = Checked(ID_RADA);
+    } else if (g_op == OP_RECOVER) fileOn = (RecoverMode() == RM_CARVE);
     g_fileOn = fileOn;
     InvalidateRect(Ctl(ID_LBLFILE), NULL, TRUE);
     EnableCtl(ID_EDITFILE, fileOn);
@@ -1373,22 +1428,23 @@ static void ApplyOp(int op) {
         L"Grava um arquivo de imagem (.img, .iso, .bin) no cartão. TODO o conteúdo atual do cartão será apagado.",
         L"Copia diretamente um cartão para outro (o destino deve ser igual ou maior). TODO o conteúdo do destino será apagado.",
         L"Lê o cartão inteiro procurando setores ilegíveis. Opcionalmente compara com uma imagem. Para saber se a capacidade é verdadeira, use Autenticidade.",
-        L"Recupera fotos (JPG/PNG), vídeos (MP4/MOV) e PDFs apagados, ou restaura o cartão (formata do zero) se estiver RAW, travado ou com capacidade errada.",
+        L"Repara cartão sem acesso ou com capacidade errada: diagnostica e explica o problema, abre partições que o Windows não vê, reconstrói partições perdidas, recupera arquivos apagados ou restaura o cartão.",
         L"Descobre se o cartão é verdadeiro ou falso (SanDisk, Samsung, Kingston, Lexar...): fabricante gravado no cartão, capacidade real e velocidade."};
     g_op = op;
     for (int i = 0; i < 6; i++) InvalidateRect(Ctl(ID_OP0 + i), NULL, FALSE);
     SetDlgItemTextW(g_hwnd, ID_DESC, desc[op]);
-    ShowCtl(ID_LBL2, op == OP_C2C || op == OP_AUTH);
+    ShowCtl(ID_LBL2, op == OP_C2C || op == OP_AUTH || op == OP_RECOVER);
     ShowCtl(ID_COMBO2, op == OP_C2C);
-    ShowCtl(ID_COMBOB, op == OP_AUTH);
+    ShowCtl(ID_COMBOB, op == OP_AUTH || op == OP_RECOVER);
+    if (op == OP_AUTH || op == OP_RECOVER) FillModeCombo(op);
     ShowCtl(ID_COMBOC, op == OP_AUTH);
     ShowCtl(ID_LBLFILE, op != OP_C2C && op != OP_AUTH);
     ShowCtl(ID_EDITFILE, op != OP_C2C && op != OP_AUTH);
     ShowCtl(ID_BROWSE, op != OP_C2C && op != OP_AUTH);
     ShowCtl(ID_CHK1, op <= OP_VERIFY || op == OP_AUTH);
     ShowCtl(ID_CHK2, op == OP_VERIFY);
-    ShowCtl(ID_RADA, op == OP_RECOVER);
-    ShowCtl(ID_RADB, op == OP_RECOVER);
+    ShowCtl(ID_RADA, FALSE);
+    ShowCtl(ID_RADB, FALSE);
     EnableCtl(ID_CHK1, TRUE);
     SetChk(ID_CHK1, FALSE);
     SetChk(ID_CHK2, FALSE);
@@ -1419,10 +1475,7 @@ static void ApplyOp(int op) {
     case OP_RECOVER:
         SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão:");
         SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Pasta onde salvar os arquivos recuperados (NÃO use o próprio cartão):");
-        SetDlgItemTextW(g_hwnd, ID_RADA, L"Recuperar arquivos apagados (fotos, vídeos MP4/MOV, PDF)");
-        SetDlgItemTextW(g_hwnd, ID_RADB, L"Restaurar o cartão: apaga TUDO e formata de novo (corrige cartão RAW ou com capacidade errada)");
-        SetChk(ID_RADA, TRUE);
-        SetChk(ID_RADB, FALSE);
+        SetDlgItemTextW(g_hwnd, ID_LBL2, L"O que fazer com o cartão:");
         break;
     case OP_AUTH:
         SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão a analisar:");
@@ -1431,7 +1484,8 @@ static void ApplyOp(int op) {
         break;
     }
     SetDlgItemTextW(g_hwnd, ID_EDITFILE, L"");
-    UpdateEnable();
+    if (op == OP_RECOVER) RecoverUi();
+    else UpdateEnable();
     InvalidateRect(g_hwnd, NULL, TRUE);
 }
 
@@ -1568,15 +1622,15 @@ static void OnStart(void) {
         }
         break;
     case OP_RECOVER:
-        j->mode = Checked(ID_RADB) ? 1 : 0;
-        if (j->mode == 0) {
+        j->mode = RecoverMode();
+        if (j->mode == RM_CARVE) {
             if (!path[0]) { Warn(L"Escolha a pasta onde salvar os arquivos recuperados."); return; }
             if (PathOnDisk(path, s->index)) { Warn(L"Salve os arquivos em outro disco, nunca no próprio cartão."); return; }
             CreateDirectoryW(path, NULL);
             DWORD at = GetFileAttributesW(path);
             if (at == INVALID_FILE_ATTRIBUTES || !(at & FILE_ATTRIBUTE_DIRECTORY)) { Warn(L"Não foi possível usar essa pasta."); return; }
-        } else {
-            _snwprintf(msg, 1799, L"Restaurar o cartão:\n%ls\n\nTODAS AS PARTIÇÕES E DADOS SERÃO APAGADOS e o cartão será formatado. Continuar?", s->label);
+        } else if (j->mode == RM_RESTORE) {
+            _snwprintf(msg, 1799, L"Restaurar o cartão:\n%ls\n\nTODAS AS PARTIÇÕES E DADOS SERÃO APAGADOS e o cartão será formatado.\n\nCartões de consoles (R36S e similares) perdem o sistema e precisarão de uma nova gravação da imagem (função Imagem → Cartão).\n\nObs.: se o diagnóstico mostrou que o PRÓPRIO CARTÃO informa capacidade pequena, esta função não resolve. Continuar?", s->label);
             if (!Confirm(msg)) return;
         }
         break;
@@ -1642,9 +1696,12 @@ static void OnDone(BOOL ok) {
     RefreshDisks();
     FlashWindow(g_hwnd, TRUE);
     if (g_summary[0]) MessageBoxW(g_hwnd, g_summary, APP_TITLE, MB_OK | g_summaryIcon);
+    if (g_openBrowse) {
+        g_openBrowse = 0;
+        if (ok) ShowBrowser();
+    }
 }
 
-#define HDR 40
 static HWND mk(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int w, int h, int id, DWORD ex) {
     return CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, S(x), S(y + HDR), S(w), S(h), g_hwnd, (HMENU)(INT_PTR)id, g_inst, NULL);
 }
@@ -1734,6 +1791,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         else if (id == ID_REFRESH && code == BN_CLICKED) { if (!g_busy) RefreshDisks(); }
         else if (id == ID_SHOWALL && code == BN_CLICKED) { if (!g_busy) { SetChk(ID_SHOWALL, !Checked(ID_SHOWALL)); RefreshDisks(); } }
         else if (id == ID_BROWSE && code == BN_CLICKED) OnBrowse();
+        else if (id == ID_COMBOB && code == CBN_SELCHANGE) { if (g_op == OP_RECOVER) RecoverUi(); }
         else if ((id == ID_CHK1 || id == ID_CHK2 || id == ID_RADA || id == ID_RADB) && code == BN_CLICKED) {
             if (id == ID_RADA || id == ID_RADB) { SetChk(ID_RADA, id == ID_RADA); SetChk(ID_RADB, id == ID_RADB); }
             else SetChk(id, !Checked(id));
@@ -1806,6 +1864,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_APP_DONE:
         OnDone((BOOL)w);
         return 0;
+    case WM_APP_ASK:
+        return Confirm((const wchar_t *)l) ? IDYES : IDNO;
     case WM_CLOSE:
         if (g_busy) {
             if (MessageBoxW(h, L"Há uma operação em andamento. Cancelar e sair?", APP_TITLE, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return 0;
@@ -1825,7 +1885,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show) {
     (void)hp; (void)cmd;
     g_inst = hi;
     InitializeCriticalSection(&g_cs);
-    INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS};
+    INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS | ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&icc);
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     HDC dc = GetDC(NULL);
@@ -1849,7 +1909,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show) {
     int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
     int sx = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
     if (sy < 0) sy = 0;
-    HWND hw = CreateWindowExW(0, L"SDCloneWnd", L"SDCLONETOOLS — copiar, gravar, verificar, autenticar e recuperar cartões SD", style, sx, sy, ww, wh, NULL, NULL, hi, NULL);
+    HWND hw = CreateWindowExW(0, L"SDCloneWnd", L"SDCLONETOOLS — copiar, gravar, verificar, autenticar e reparar cartões SD", style, sx, sy, ww, wh, NULL, NULL, hi, NULL);
     if (!hw) return 1;
     DarkTitlebar(hw);
     ShowWindow(hw, show);

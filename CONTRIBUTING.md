@@ -17,6 +17,11 @@ Obrigado por ajudar! Este projeto é feito pela e para a comunidade que lida com
   gcc -O1 -o test_core test_core.c && ./test_core
   ```
   Ele deve terminar com `RESULTADO: TUDO OK`. Se mexer em `core.h`, acrescente um caso em `test_core.c`.
+- Se mexer em `fsread.h` ou `diag.h`, rode também (Linux, como root; veja os pacotes necessários no README):
+  ```sh
+  sudo python3 tests/run_tests.py
+  ```
+  Acrescente um caso em `tests/run_tests.py` para cada comportamento novo.
 - Compile com `./build.sh` e confirme que não há erros.
 - **Teste em cartão sem dados importantes**, especialmente qualquer mudança que grave no disco.
 - Mudanças em operações que gravam devem manter as proteções: nunca listar o disco do sistema e sempre pedir confirmação.

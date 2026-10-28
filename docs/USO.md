@@ -53,19 +53,37 @@ Clona direto de um cartão para outro. **Apaga todo o conteúdo do destino.**
 
 > A leitura completa não prova a capacidade. Um cartão falso lê sem erros. Para isso, use o teste de capacidade ou a **Autenticidade**.
 
-### Recuperar cartão
-Dois modos:
+### Recuperar cartão (reparar cartão sem acesso ou com capacidade errada)
+Escolha o que fazer na lista **"O que fazer com o cartão"**. Se não sabe o que está errado, comece pelo **1. Diagnosticar**.
 
-**Recuperar arquivos apagados** (só lê o cartão):
+**1. Diagnosticar o cartão** (não altera nada). Lê a tabela de partições (MBR/GPT), reconhece os sistemas de arquivos (FAT, exFAT, NTFS, ext2/3/4...), procura partições perdidas e explica no registro e na janela final **por que** o cartão está assim. Exemplos de resultado:
+
+| Diagnóstico | O que significa | O que fazer |
+|---|---|---|
+| O próprio cartão informa só alguns MB (ex.: cartão de 128 GB aparecendo com 32 MB) | O controlador do cartão está devolvendo capacidade errada: cartão falso, controlador em modo de proteção ou leitor ruim. **Não é partição.** | Teste outro leitor/slot. Se continuar, não há reparo por software comum; troque o cartão. |
+| As partições cobrem só uma parte do cartão | Uma imagem pequena foi gravada num cartão grande; o resto está sem partição. Os dados estão intactos. | Amplie a partição (GParted/MiniTool) ou use **Restaurar** (apaga tudo). |
+| Partições Linux (ext4) | Normal em consoles (R36S, ArkOS, JELOS...). O Windows não lê e pede para formatar. | **Não formate.** Use **Ver / copiar arquivos**. |
+| Tabela de partições apagada, partições encontradas | Cartão aparece como RAW; os dados estão lá. | **Reconstruir partições**. |
+| Partição além do fim do cartão | Cartão falso ou imagem de cartão maior. | Rode **Autenticidade**. |
+| Falhas de leitura | Defeito físico ou leitor ruim. | Salve o que puder e troque o cartão. |
+
+**2. Ver / copiar arquivos** (só lê o cartão). Abre uma janela com as partições do cartão, inclusive as que o Windows **não** mostra (por exemplo ext4 de consoles Linux) e as encontradas fora da tabela. Navegue pelas pastas (dois cliques), selecione arquivos e copie para o PC ("Copiar selecionados" ou "Copiar tudo desta pasta"). Lê FAT12/16/32, exFAT e ext2/3/4. Nomes inválidos no Windows são ajustados e links simbólicos são ignorados.
+
+**3. Reconstruir partições perdidas.** Reescreve o setor de partições (MBR) com as partições encontradas. **Não apaga dados.** Mostra a lista antes de gravar e guarda uma cópia do início do cartão em *Documentos* (`SDCLONETOOLS_backup_Disco...bin`). Funciona só em cartões MBR (não reconstrói GPT). Depois, remova e reinsira o cartão.
+
+**4. Recuperar arquivos apagados** (só lê o cartão):
 - Procura **JPG, PNG, PDF e vídeos MP4/MOV** apagados ou perdidos.
 - Escolha uma pasta de destino em **outro disco**. Nunca salve no próprio cartão (o app bloqueia).
 - Os arquivos saem com nomes numerados (`recuperado_000001.jpg`...), pois os nomes originais não existem mais.
 - Se o cartão foi formatado ou regravado há muito tempo, os dados podem ter sido sobrescritos.
 - Arquivos fragmentados e outros formatos (RAW de câmera, Word, ZIP...) não são recuperados.
 
-**Restaurar o cartão** (**apaga tudo**):
-- Limpa o cartão, cria uma partição e formata (nome `SDCARD`): **FAT32** até 32 GB, **exFAT** acima.
-- Corrige cartão que aparece como **RAW**, protegido ou com capacidade errada no Windows.
+**5. Restaurar o cartão** (**apaga tudo**):
+- Limpa o cartão, cria uma partição do tamanho total e formata (nome `SDCARD`): **FAT32** até 32 GB, **exFAT** acima.
+- Devolve o uso de um cartão com partições estranhas, protegido ou RAW. Não conserta cartão cujo controlador informa capacidade errada (o diagnóstico avisa).
+- Cartões de consoles perdem o sistema: regrave a imagem depois (Imagem → Cartão).
+
+> **Importante:** se o Windows pedir para formatar o cartão, clique em **Cancelar** e use o diagnóstico antes. Formatar pode apagar dados que ainda dá para salvar.
 
 ### Autenticidade (verdadeiro ou falso)
 Ajuda a descobrir se o cartão é original ou falsificado.
@@ -86,7 +104,7 @@ Ajuda a descobrir se o cartão é original ou falsificado.
 | Capacidade real menor que a anunciada | **Cartão falso** (o app mostra a capacidade real estimada) |
 | Velocidade de gravação abaixo da classe anunciada | Suspeito, ou cartão desgastado, ou leitor USB lento |
 
-Depois do teste completo, use **Recuperar cartão → Restaurar** para formatar o cartão de novo.
+Depois do teste completo, use **Recuperar cartão → 5. Restaurar** para formatar o cartão de novo.
 
 ## Limites importantes
 
@@ -107,6 +125,10 @@ Depois do teste completo, use **Recuperar cartão → Restaurar** para formatar 
 |---|---|
 | `sdclone.c` | Interface Win32 e operações de disco |
 | `core.h` | Motor de recuperação (assinaturas de arquivo), padrão do teste de capacidade e tabela de fabricantes |
+| `fsread.h` | Leitores somente leitura de FAT12/16/32, exFAT e ext2/3/4 (independentes de Windows) |
+| `diag.h` | Diagnóstico: MBR/GPT, partições perdidas, veredito e reconstrução do MBR (independente de Windows) |
+| `repair.h` | Parte do app que usa o diagnóstico: relatório, reconstrução e navegador de arquivos |
+| `fstest.c`, `tests/run_tests.py` | Ferramenta e testes automatizados dos leitores e do diagnóstico (Linux) |
 | `test_core.c` | Teste do motor de recuperação (roda em Linux) |
 | `sdclone.rc`, `sdclone.manifest`, `sdclone.ico`, `mkicon.py` | Recursos: ícone e manifesto (exige administrador) |
 | `build.sh` | Compila os dois `.exe` |
@@ -122,5 +144,13 @@ Depois do teste completo, use **Recuperar cartão → Restaurar** para formatar 
 ```sh
 gcc -O1 -o test_core test_core.c && ./test_core
 ```
+
+**Testar leitores de sistemas de arquivos e diagnóstico** (Linux, como root; precisa de `dosfstools mtools exfatprogs exfat-fuse e2fsprogs fdisk`):
+
+```sh
+python3 tests/run_tests.py
+```
+
+Cria imagens reais (FAT12/16/32, exFAT, ext2/3/4, MBR, GPT, tabela perdida, cartão minúsculo, etc.), lê todos os arquivos e confere o CRC.
 
 C puro com a API Win32, sem dependências além das DLLs do próprio Windows.

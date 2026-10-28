@@ -10,11 +10,11 @@ labels: ''
 
 **Leitor (slot SD nativo do notebook/PC ou adaptador USB — qual?):**
 
-**Função usada:** (Cartão → Imagem / Imagem → Cartão / Cartão → Cartão / Verificar / Recuperar / Autenticidade)
+**Função usada:** (Cartão → Imagem / Imagem → Cartão / Cartão → Cartão / Verificar / Recuperar cartão (qual modo) / Autenticidade)
 
 **O que aconteceu e o que você esperava:**
 
-**Registro do app:** (copie o texto da caixa de registro no rodapé da janela)
+**Registro do app:** (para problemas de capacidade, inclua o texto do Diagnóstico) (copie o texto da caixa de registro no rodapé da janela)
 
 ```
 ```

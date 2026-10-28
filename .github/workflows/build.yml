@@ -6,6 +6,11 @@ on:
     paths:
       - 'sdclone.c'
       - 'core.h'
+      - 'fsread.h'
+      - 'diag.h'
+      - 'repair.h'
+      - 'fstest.c'
+      - 'tests/**'
       - 'sdclone.rc'
       - 'sdclone.manifest'
       - 'mkicon.py'
@@ -28,6 +33,13 @@ jobs:
 
       - name: Teste do motor de recuperação
         run: gcc -O1 -o test_core test_core.c && ./test_core
+
+      - name: Testes dos leitores de sistemas de arquivos e do diagnóstico
+        continue-on-error: true
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dosfstools mtools exfatprogs exfat-fuse e2fsprogs fdisk
+          sudo python3 tests/run_tests.py
 
       - name: Instalar o Zig
         run: pip install ziglang
