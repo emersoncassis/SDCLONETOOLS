@@ -1300,6 +1300,59 @@ static BOOL RunHidden(wchar_t *cmd, DWORD *exitCode) {
     return TRUE;
 }
 
+/* testa se o cartão aceita gravação de verdade (chave de proteção, cartão falso/defeituoso). Restaura o que escreveu. */
+static BOOL ProbeWrite(int disk) {
+    DiskInfo *di = FindDisk(disk);
+    VolSet vs;
+    BOOL good = TRUE;
+    vs.n = 0;
+    if (!di) return TRUE;
+    uint32_t sec = di->sec, len = sec > 4096 ? sec : 4096;
+    uint64_t sz = di->size;
+    Log(L"Testando se o cartão aceita gravação (grava e lê de volta em 3 pontos; o conteúdo original é restaurado)...");
+    LockDiskVolumes(disk, &vs);
+    HANDLE h = OpenDisk(disk, TRUE);
+    if (h == INVALID_HANDLE_VALUE) {
+        LogErr(L"abrir o cartão para escrita");
+        UnlockVolumes(&vs);
+        return FALSE;
+    }
+    DWORD br;
+    if (!DeviceIoControl(h, IOCTL_DISK_IS_WRITABLE, NULL, 0, NULL, 0, &br, NULL) && GetLastError() == ERROR_WRITE_PROTECT) {
+        Log(L"RESULTADO: o cartão está PROTEGIDO CONTRA GRAVAÇÃO (chave de trava do cartão SD/adaptador microSD, ou do leitor).");
+        SetSummary(MB_ICONERROR, L"O cartão está PROTEGIDO CONTRA GRAVAÇÃO.\n\nCorrija: desloque a chave lateral do cartão SD (ou do adaptador do microSD) para a posição destravada e tente de novo. Se não houver chave, tente outro leitor.");
+        CloseHandle(h);
+        UnlockVolumes(&vs);
+        return FALSE;
+    }
+    uint8_t *o = (uint8_t *)ALLOC_ALIGNED(len), *w = (uint8_t *)ALLOC_ALIGNED(len), *r = (uint8_t *)ALLOC_ALIGNED(len);
+    if (o && w && r) {
+        uint64_t offs[3] = {1024 * 1024, (sz / 2 / sec) * sec, ((sz - 1024 * 1024) / sec) * sec};
+        for (int i = 0; i < 3; i++) {
+            if (offs[i] + len > sz) continue;
+            FillPattern(w, 0, len, 0x5DC1A55ull + (uint64_t)i);
+            if (!ReadAtRaw(h, offs[i], o, len)) { Log(L"  posição %I64u: leitura falhou", (unsigned long long)offs[i]); good = FALSE; continue; }
+            BOOL wr = WriteAtRaw(h, offs[i], w, len);
+            FlushFileBuffers(h);
+            BOOL rd = wr && ReadAtRaw(h, offs[i], r, len);
+            BOOL same = rd && memcmp(w, r, len) == 0;
+            WriteAtRaw(h, offs[i], o, len);
+            Log(L"  posição %I64u: gravação %ls, leitura de volta %ls", (unsigned long long)offs[i], wr ? L"ok" : L"FALHOU", same ? L"idêntica" : L"DIFERENTE/FALHOU");
+            if (!same) good = FALSE;
+        }
+    }
+    if (o) FREE_ALIGNED(o);
+    if (w) FREE_ALIGNED(w);
+    if (r) FREE_ALIGNED(r);
+    CloseHandle(h);
+    UnlockVolumes(&vs);
+    if (!good) {
+        Log(L"RESULTADO: o cartão NÃO grava corretamente. Verifique a chave de trava do cartão/adaptador, troque de leitor; se continuar, o cartão está com defeito ou é falso (rode Autenticidade) e deve ser trocado.");
+        SetSummary(MB_ICONERROR, L"O cartão não aceitou gravação corretamente, por isso não foi possível formatar.\n\n1) Confira a chave de trava do cartão SD ou do adaptador microSD (posição destravada).\n2) Teste outro leitor/porta USB.\n3) Se continuar, o cartão está com defeito ou é falso: rode 'Autenticidade' e troque o cartão.");
+    } else Log(L"O cartão aceitou a gravação nos 3 pontos testados.");
+    return good;
+}
+
 static BOOL FormatDisk(int disk, const char *fs, const char *label) {
     wchar_t tmpdir[MAX_PATH], tmp[MAX_PATH], cmd[MAX_PATH + 64];
     char script[700];
@@ -1307,7 +1360,7 @@ static BOOL FormatDisk(int disk, const char *fs, const char *label) {
     DWORD w, code = 1;
     SetIndet(L"Formatando o cartão (limpar, particionar e formatar)...");
     _snprintf(script, sizeof script - 1,
-              "select disk %d\r\nattributes disk clear readonly noerr\r\nclean\r\ncreate partition primary\r\nformat fs=%s quick label=%s\r\nassign\r\nexit\r\n",
+              "select disk %d\r\nattributes disk clear readonly noerr\r\nonline disk noerr\r\nclean\r\nconvert mbr noerr\r\ncreate partition primary\r\nformat fs=%s quick label=%s\r\nassign\r\nexit\r\n",
               disk, fs, label);
     script[sizeof script - 1] = 0;
     GetTempPathW(MAX_PATH, tmpdir);
@@ -1321,7 +1374,10 @@ static BOOL FormatDisk(int disk, const char *fs, const char *label) {
     cmd[MAX_PATH + 63] = 0;
     if (!RunHidden(cmd, &code)) { LogErr(L"executar o diskpart"); DeleteFileW(tmp); return FALSE; }
     DeleteFileW(tmp);
-    if (code != 0) Log(L"ERRO: o diskpart terminou com código %lu. Veja as mensagens acima.", (unsigned long)code);
+    if (code != 0) {
+        Log(L"ERRO: o diskpart terminou com código %lu. Veja as mensagens acima.", (unsigned long)code);
+        ProbeWrite(disk);
+    }
     return code == 0;
 }
 
