@@ -1,0 +1,80 @@
+# SDCLONETOOLS
+
+**Ferramenta gratuita e de código aberto para Windows para quem trabalha com cartões SD em gamesticks e consoles portáteis chineses.**
+
+Quem monta, grava e conserta esses aparelhos (R36S e clones, M17, gamesticks e similares) vive com cartões SD: gravar o sistema, clonar o cartão que já está configurado, fazer backup, recuperar o que sumiu e, principalmente, descobrir se o cartão que veio na caixa é mesmo o que diz ser. O SDCLONETOOLS junta tudo isso em **um único `.exe`**, sem instalação, sem anúncios e sem dependências.
+
+## O que faz
+
+| Função | Para que serve |
+|---|---|
+| **Cartão → Imagem** | Backup exato do cartão em um arquivo `.img` |
+| **Imagem → Cartão** | Grava a imagem do sistema (`.img`, `.iso`, `.bin`) no cartão, com verificação |
+| **Cartão → Cartão** | Clona um cartão direto em outro (o destino pode ser maior) |
+| **Verificar cartão** | Procura setores ruins, compara com uma imagem e testa a capacidade real |
+| **Recuperar cartão** | Recupera fotos, vídeos e PDFs apagados; restaura cartão RAW ou travado |
+| **Autenticidade** | Descobre se o cartão é verdadeiro ou falso: marca, fabricante registrado, capacidade real e velocidade |
+
+### Por que a Autenticidade importa
+
+Cartão falso (um cartão de 8 GB que se anuncia como 128 GB, por exemplo) é comum em kits e aparelhos baratos. Ele grava e lê normalmente até o espaço real acabar, e depois corrompe os dados em silêncio. O SDCLONETOOLS:
+
+- lê o **fabricante gravado no cartão** (registro CID) e compara com a marca da etiqueta (SanDisk, Samsung, Kingston, Lexar, Sony, Transcend, ADATA...);
+- faz o **teste de capacidade real**: grava dados em todo o cartão e confere se voltam idênticos;
+- compara a velocidade medida com a **classe anunciada** (Class 10, U1, U3, V30...).
+
+> O chip de memória (NAND) em si não fica registrado no cartão, então nenhum software consegue dizer quem o fabricou. A ferramenta identifica o fabricante/etiqueta do cartão, e o teste de capacidade mostra se ele entrega o que promete.
+
+## Download e uso rápido
+
+1. Baixe o `SDCloneTools.exe` na página de [Releases](../../releases) (use o `SDCloneTools32.exe` apenas em Windows de 32 bits).
+2. Execute e aceite o pedido de **administrador** (necessário para acessar o disco direto).
+3. Escolha a função, o cartão e clique em **Iniciar**.
+
+O guia completo, função por função, está em [docs/USO.md](docs/USO.md).
+
+## Segurança
+
+- O disco do sistema **nunca aparece** na lista, e por padrão só aparecem cartões e discos removíveis.
+- Toda operação que grava mostra o disco escolhido e pede confirmação. **Confira o disco antes de confirmar.**
+- **Teste com um cartão sem dados importantes antes de usar no dia a dia.** Este é um software novo.
+- O Windows SmartScreen ou o antivírus podem alertar, porque o programa acessa o disco diretamente e não tem assinatura digital. Todo o código-fonte está neste repositório, e você pode compilar o seu próprio `.exe` (veja abaixo).
+
+## Compilar
+
+C puro com a API Win32, sem dependências. Precisa de Python e do compilador Zig (`pip install ziglang`); funciona a partir de Linux, macOS ou Windows:
+
+```sh
+./build.sh
+```
+
+Isso gera `SDCloneTools.exe` (64 bits) e `SDCloneTools32.exe`.
+
+Para testar o motor de recuperação de arquivos (em Linux):
+
+```sh
+gcc -O1 -o test_core test_core.c && ./test_core
+```
+
+## Estrutura
+
+| Arquivo | Conteúdo |
+|---|---|
+| `sdclone.c` | Interface Win32 e operações de disco |
+| `core.h` | Motor de recuperação, padrão do teste de capacidade e tabela de fabricantes |
+| `test_core.c` | Teste automatizado do motor de recuperação |
+| `sdclone.rc`, `sdclone.manifest`, `sdclone.ico`, `mkicon.py` | Ícone e manifesto (exige administrador) |
+| `build.sh` | Script de compilação |
+| `docs/USO.md` | Guia de uso completo |
+
+## Contribuir
+
+Contribuições são muito bem-vindas: relatos de cartões testados, novos fabricantes na tabela, correções e traduções. Veja [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Licença
+
+[MIT](LICENSE). Use, modifique e distribua à vontade.
+
+## Aviso
+
+Este software acessa dispositivos de armazenamento diretamente e é fornecido **sem garantia de qualquer tipo**. Use por sua conta e risco e mantenha backup do que importa.
