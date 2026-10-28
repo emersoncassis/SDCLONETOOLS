@@ -4,6 +4,14 @@
 
 Quem monta, grava e conserta esses aparelhos (R36S e clones, M17, gamesticks e similares) vive com cartões SD: gravar o sistema, clonar o cartão que já está configurado, fazer backup, recuperar o que sumiu e, principalmente, descobrir se o cartão que veio na caixa é mesmo o que diz ser. O SDCLONETOOLS junta tudo isso em **um único `.exe`**, sem instalação, sem anúncios e sem dependências.
 
+## Download
+
+[**⬇ Baixar SDCloneTools.exe (Windows 64 bits)**](https://github.com/emersoncassis/SDCLONETOOLS/releases/latest/download/SDCloneTools.exe)
+
+[Baixar SDCloneTools32.exe (Windows 32 bits)](https://github.com/emersoncassis/SDCLONETOOLS/releases/latest/download/SDCloneTools32.exe) · [Todas as versões](https://github.com/emersoncassis/SDCLONETOOLS/releases)
+
+Arquivo único, sem instalação. Execute e aceite o pedido de administrador.
+
 ## O que faz
 
 | Função | Para que serve |
@@ -27,7 +35,7 @@ Cartão falso (um cartão de 8 GB que se anuncia como 128 GB, por exemplo) é co
 
 ## Download e uso rápido
 
-1. Baixe o `SDCloneTools.exe` na página de [Releases](../../releases) (use o `SDCloneTools32.exe` apenas em Windows de 32 bits).
+1. [Baixe o `SDCloneTools.exe`](https://github.com/emersoncassis/SDCLONETOOLS/releases/latest/download/SDCloneTools.exe) (use o `SDCloneTools32.exe` apenas em Windows de 32 bits).
 2. Execute e aceite o pedido de **administrador** (necessário para acessar o disco direto).
 3. Escolha a função, o cartão e clique em **Iniciar**.
 

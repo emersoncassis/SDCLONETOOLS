@@ -27,7 +27,7 @@ enum {
     ID_OP0 = 100, /* 100..105 */
     ID_DESC = 120, ID_LBL1, ID_COMBO1, ID_REFRESH, ID_SHOWALL, ID_LBL2, ID_COMBO2, ID_COMBOB, ID_COMBOC,
     ID_LBLFILE, ID_EDITFILE, ID_BROWSE, ID_CHK1, ID_CHK2, ID_RADA, ID_RADB,
-    ID_START, ID_CANCELBTN, ID_PROGRESS, ID_STATUS, ID_LOG
+    ID_START, ID_CANCELBTN, ID_PROGRESS, ID_STATUS, ID_LOG, ID_HEADER
 };
 
 /* ------------------------------------------------------------------ dados */
@@ -101,6 +101,250 @@ static const struct { const wchar_t *name; int mbs; } CLASSES[] = {
 
 /* ----------------------------------------------------------------- utilitários */
 static HWND Ctl(int id) { return GetDlgItem(g_hwnd, id); }
+
+/* ============================ TEMA DARK / NEON ============================ */
+#define CL_BG     RGB(8, 12, 24)
+#define CL_PANEL  RGB(14, 22, 42)
+#define CL_PANEL2 RGB(16, 44, 82)
+#define CL_EDGE   RGB(34, 54, 96)
+#define CL_NEON   RGB(0, 212, 255)
+#define CL_NEON2  RGB(30, 144, 255)
+#define CL_TXT    RGB(214, 230, 255)
+#define CL_DIM    RGB(96, 116, 150)
+#define CL_DANGER RGB(255, 84, 112)
+#define CL_INPUT  RGB(10, 17, 34)
+#define CL_LOG    RGB(6, 10, 20)
+#define CL_LOGTXT RGB(120, 220, 255)
+
+static HBRUSH g_brBg, g_brInput, g_brLog;
+static HFONT g_fontB, g_fontMono, g_fontTitle, g_fontSmall;
+static int g_hover = 0;
+static BOOL g_fileOn = TRUE;
+static BOOL g_chk[512];
+
+static BOOL Checked(int id) { return g_chk[id]; }
+static void SetChk(int id, BOOL v) {
+    g_chk[id] = v;
+    if (g_hwnd && Ctl(id)) InvalidateRect(Ctl(id), NULL, FALSE);
+}
+
+typedef HRESULT(WINAPI *PFN_SWT)(HWND, LPCWSTR, LPCWSTR);
+static void SetTheme(HWND h, const wchar_t *a, const wchar_t *b) {
+    static PFN_SWT f = NULL;
+    static int tried = 0;
+    if (!tried) {
+        tried = 1;
+        HMODULE m = LoadLibraryW(L"uxtheme.dll");
+        if (m) f = (PFN_SWT)GetProcAddress(m, "SetWindowTheme");
+    }
+    if (f) f(h, a, b);
+}
+
+static void DarkTitlebar(HWND h) {
+    typedef HRESULT(WINAPI * F)(HWND, DWORD, LPCVOID, DWORD);
+    HMODULE m = LoadLibraryW(L"dwmapi.dll");
+    if (!m) return;
+    F f = (F)GetProcAddress(m, "DwmSetWindowAttribute");
+    if (!f) return;
+    BOOL on = TRUE;
+    if (FAILED(f(h, 20, &on, sizeof on))) f(h, 19, &on, sizeof on);
+    COLORREF c = CL_BG;
+    f(h, 35, &c, sizeof c);
+    c = CL_NEON2;
+    f(h, 34, &c, sizeof c);
+    c = CL_TXT;
+    f(h, 36, &c, sizeof c);
+}
+
+static void Fill(HDC dc, RECT r, COLORREF c) {
+    HBRUSH b = CreateSolidBrush(c);
+    FillRect(dc, &r, b);
+    DeleteObject(b);
+}
+static void Frame(HDC dc, RECT r, COLORREF c) {
+    HBRUSH b = CreateSolidBrush(c);
+    FrameRect(dc, &r, b);
+    DeleteObject(b);
+}
+static void Txt(HDC dc, const wchar_t *t, RECT *r, UINT fl, COLORREF c, HFONT f) {
+    HGDIOBJ o = SelectObject(dc, f);
+    SetTextColor(dc, c);
+    SetBkMode(dc, TRANSPARENT);
+    DrawTextW(dc, t, -1, r, fl);
+    SelectObject(dc, o);
+}
+
+static void DrawButton(DRAWITEMSTRUCT *d) {
+    int id = (int)d->CtlID, w = d->rcItem.right - d->rcItem.left, h = d->rcItem.bottom - d->rcItem.top;
+    HDC dc = CreateCompatibleDC(d->hDC);
+    HBITMAP bm = CreateCompatibleBitmap(d->hDC, w, h);
+    HGDIOBJ ob = SelectObject(dc, bm);
+    RECT r = {0, 0, w, h};
+    BOOL dis = (d->itemState & ODS_DISABLED) != 0, sel = (d->itemState & ODS_SELECTED) != 0;
+    BOOL hot = (g_hover == id) && !dis, foc = (d->itemState & ODS_FOCUS) != 0 && !dis;
+    wchar_t t[200];
+    GetWindowTextW(d->hwndItem, t, 200);
+    Fill(dc, r, CL_BG);
+    if (id >= ID_OP0 && id <= ID_OP0 + 5) {
+        BOOL on = (id - ID_OP0 == g_op);
+        Fill(dc, r, on ? CL_PANEL2 : (hot ? RGB(20, 34, 64) : CL_PANEL));
+        Frame(dc, r, on ? (dis ? CL_NEON2 : CL_NEON) : (hot ? CL_NEON2 : CL_EDGE));
+        if (on) {
+            RECT b = {0, h - S(3), w, h};
+            Fill(dc, b, dis ? CL_NEON2 : CL_NEON);
+        }
+        RECT tr = {S(4), 0, w - S(4), h - S(3)}, cr = tr;
+        SelectObject(dc, g_fontB);
+        DrawTextW(dc, t, -1, &cr, DT_CALCRECT | DT_WORDBREAK | DT_CENTER);
+        int th = cr.bottom - cr.top;
+        tr.top = (tr.bottom - th) / 2;
+        tr.bottom = tr.top + th;
+        Txt(dc, t, &tr, DT_WORDBREAK | DT_CENTER, on ? RGB(235, 248, 255) : (dis ? CL_DIM : CL_TXT), g_fontB);
+    } else if (id == ID_START || id == ID_CANCELBTN || id == ID_REFRESH || id == ID_BROWSE) {
+        BOOL isStart = (id == ID_START), isCancel = (id == ID_CANCELBTN);
+        COLORREF fill, border, tc;
+        if (isStart) {
+            fill = dis ? CL_EDGE : (sel ? RGB(0, 140, 190) : (hot ? RGB(80, 230, 255) : CL_NEON));
+            border = fill;
+            tc = dis ? CL_DIM : CL_BG;
+        } else {
+            fill = sel ? CL_PANEL2 : (hot ? RGB(18, 32, 60) : CL_PANEL);
+            border = dis ? CL_EDGE : (isCancel ? CL_DANGER : (hot ? CL_NEON : CL_NEON2));
+            tc = dis ? CL_DIM : (isCancel ? CL_DANGER : CL_TXT);
+        }
+        Fill(dc, r, fill);
+        Frame(dc, r, border);
+        if (hot && !isStart) {
+            RECT in = r;
+            InflateRect(&in, -1, -1);
+            Frame(dc, in, CL_EDGE);
+        }
+        Txt(dc, t, &r, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX, tc, (isStart || isCancel) ? g_fontB : g_font);
+    } else {
+        BOOL radio = (id == ID_RADA || id == ID_RADB), on = Checked(id);
+        int bs = S(16), y0 = (h - bs) / 2;
+        RECT bx = {S(2), y0, S(2) + bs, y0 + bs};
+        COLORREF bc = dis ? CL_EDGE : ((hot || foc) ? CL_NEON : CL_NEON2);
+        if (radio) {
+            HBRUSH nb = CreateSolidBrush(CL_INPUT);
+            HPEN pn = CreatePen(PS_SOLID, 1, bc);
+            HGDIOBJ ob1 = SelectObject(dc, nb), ob2 = SelectObject(dc, pn);
+            Ellipse(dc, bx.left, bx.top, bx.right, bx.bottom);
+            SelectObject(dc, ob1);
+            SelectObject(dc, ob2);
+            DeleteObject(nb);
+            DeleteObject(pn);
+            if (on) {
+                HBRUSH ib = CreateSolidBrush(dis ? CL_DIM : CL_NEON);
+                HPEN ip = CreatePen(PS_SOLID, 1, dis ? CL_DIM : CL_NEON);
+                ob1 = SelectObject(dc, ib);
+                ob2 = SelectObject(dc, ip);
+                Ellipse(dc, bx.left + S(4), bx.top + S(4), bx.right - S(4), bx.bottom - S(4));
+                SelectObject(dc, ob1);
+                SelectObject(dc, ob2);
+                DeleteObject(ib);
+                DeleteObject(ip);
+            }
+        } else {
+            Fill(dc, bx, CL_INPUT);
+            Frame(dc, bx, bc);
+            if (on) {
+                RECT in = bx;
+                InflateRect(&in, -S(3), -S(3));
+                Fill(dc, in, dis ? CL_DIM : CL_NEON);
+            }
+        }
+        RECT tr = {bx.right + S(8), 0, w, h};
+        Txt(dc, t, &tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX, dis ? CL_DIM : CL_TXT, g_font);
+    }
+    BitBlt(d->hDC, d->rcItem.left, d->rcItem.top, w, h, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, ob);
+    DeleteObject(bm);
+    DeleteDC(dc);
+}
+
+static void DrawCombo(DRAWITEMSTRUCT *d) {
+    RECT rc = d->rcItem;
+    BOOL dis = (d->itemState & ODS_DISABLED) != 0;
+    BOOL edit = (d->itemState & ODS_COMBOBOXEDIT) != 0;
+    BOOL hi = (d->itemState & ODS_SELECTED) != 0 && !edit;
+    Fill(d->hDC, rc, hi ? RGB(16, 52, 96) : CL_INPUT);
+    if ((int)d->itemID < 0) return;
+    wchar_t t[400];
+    t[0] = 0;
+    if (SendMessageW(d->hwndItem, CB_GETLBTEXT, d->itemID, (LPARAM)t) == CB_ERR) return;
+    if (hi) {
+        RECT b = {rc.left, rc.top, rc.left + S(3), rc.bottom};
+        Fill(d->hDC, b, CL_NEON);
+    }
+    RECT tr = rc;
+    tr.left += S(8);
+    tr.right -= S(4);
+    Txt(d->hDC, t, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX, dis ? CL_DIM : (hi ? RGB(235, 248, 255) : CL_TXT), g_font);
+}
+
+static void DrawHeader(DRAWITEMSTRUCT *d) {
+    int w = d->rcItem.right - d->rcItem.left, h = d->rcItem.bottom - d->rcItem.top;
+    HDC dc = CreateCompatibleDC(d->hDC);
+    HBITMAP bm = CreateCompatibleBitmap(d->hDC, w, h);
+    HGDIOBJ ob = SelectObject(dc, bm);
+    for (int x = 0; x < w; x += 4) {
+        int t = x * 255 / (w > 0 ? w : 1);
+        RECT s = {x, 0, x + 4, h};
+        Fill(dc, s, RGB(8 + t * 4 / 255, 12 + t * 34 / 255, 24 + t * 66 / 255));
+    }
+    RECT l2 = {0, h - 4, w, h - 2}, l1 = {0, h - 2, w, h};
+    Fill(dc, l2, RGB(0, 70, 110));
+    Fill(dc, l1, CL_NEON);
+    SelectObject(dc, g_fontTitle);
+    SetBkMode(dc, TRANSPARENT);
+    const wchar_t *title = L"SDCLONETOOLS";
+    SIZE sz;
+    GetTextExtentPoint32W(dc, L"M", 1, &sz);
+    int ty = (h - 4 - sz.cy) / 2, x = S(14), sp = S(4);
+    for (int pass = 0; pass < 2; pass++) {
+        int cx = x;
+        for (const wchar_t *c = title; *c; c++) {
+            GetTextExtentPoint32W(dc, c, 1, &sz);
+            if (pass == 0) {
+                SetTextColor(dc, RGB(0, 80, 125));
+                TextOutW(dc, cx - 1, ty, c, 1);
+                TextOutW(dc, cx + 1, ty, c, 1);
+                TextOutW(dc, cx, ty - 1, c, 1);
+                TextOutW(dc, cx, ty + 1, c, 1);
+            } else {
+                SetTextColor(dc, CL_NEON);
+                TextOutW(dc, cx, ty, c, 1);
+            }
+            cx += sz.cx + sp;
+        }
+    }
+    RECT sr = {0, 0, w - S(14), h - 4};
+    Txt(dc, L"CARTÕES SD · GAMESTICK & PORTÁTEIS", &sr, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX, RGB(80, 170, 210), g_fontSmall);
+    BitBlt(d->hDC, d->rcItem.left, d->rcItem.top, w, h, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, ob);
+    DeleteObject(bm);
+    DeleteDC(dc);
+}
+
+static LRESULT CALLBACK BtnSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR ref) {
+    (void)ref;
+    if (m == WM_MOUSEMOVE && g_hover != (int)id) {
+        int old = g_hover;
+        g_hover = (int)id;
+        TRACKMOUSEEVENT t = {sizeof t, TME_LEAVE, h, 0};
+        TrackMouseEvent(&t);
+        InvalidateRect(h, NULL, FALSE);
+        if (old && Ctl(old)) InvalidateRect(Ctl(old), NULL, FALSE);
+    } else if (m == WM_MOUSELEAVE) {
+        if (g_hover == (int)id) g_hover = 0;
+        InvalidateRect(h, NULL, FALSE);
+    } else if (m == WM_NCDESTROY) {
+        RemoveWindowSubclass(h, BtnSub, id);
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+/* ========================================================================== */
 
 static void FmtSize(uint64_t b, wchar_t *out, size_t n) {
     static const wchar_t *u[] = {L"B", L"KB", L"MB", L"GB", L"TB"};
@@ -323,7 +567,7 @@ static void FillDiskCombo(int id, int prev) {
 
 static void RefreshDisks(void) {
     int p1 = SelectedDisk(ID_COMBO1), p2 = SelectedDisk(ID_COMBO2);
-    BOOL all = IsDlgButtonChecked(g_hwnd, ID_SHOWALL) == BST_CHECKED;
+    BOOL all = Checked(ID_SHOWALL);
     g_sysDisk = SystemDisk();
     g_ndisks = 0;
     for (int i = 0; i < 32; i++) {
@@ -1109,16 +1353,16 @@ static DWORD WINAPI Worker(LPVOID p) {
 /* ---------------------------------------------------------------------- UI */
 static void ShowCtl(int id, BOOL s) { ShowWindow(Ctl(id), s ? SW_SHOW : SW_HIDE); }
 static void EnableCtl(int id, BOOL e) { EnableWindow(Ctl(id), e); }
-static BOOL Checked(int id) { return IsDlgButtonChecked(g_hwnd, id) == BST_CHECKED; }
 
 static void UpdateEnable(void) {
     BOOL fileOn = TRUE;
     if (g_op == OP_VERIFY) {
-        if (Checked(ID_CHK2)) CheckDlgButton(g_hwnd, ID_CHK1, BST_UNCHECKED);
+        if (Checked(ID_CHK2)) SetChk(ID_CHK1, FALSE);
         EnableCtl(ID_CHK1, !Checked(ID_CHK2));
         fileOn = Checked(ID_CHK1) && !Checked(ID_CHK2);
     } else if (g_op == OP_RECOVER) fileOn = Checked(ID_RADA);
-    EnableCtl(ID_LBLFILE, fileOn);
+    g_fileOn = fileOn;
+    InvalidateRect(Ctl(ID_LBLFILE), NULL, TRUE);
     EnableCtl(ID_EDITFILE, fileOn);
     EnableCtl(ID_BROWSE, fileOn);
 }
@@ -1132,7 +1376,7 @@ static void ApplyOp(int op) {
         L"Recupera fotos (JPG/PNG), vídeos (MP4/MOV) e PDFs apagados, ou restaura o cartão (formata do zero) se estiver RAW, travado ou com capacidade errada.",
         L"Descobre se o cartão é verdadeiro ou falso (SanDisk, Samsung, Kingston, Lexar...): fabricante gravado no cartão, capacidade real e velocidade."};
     g_op = op;
-    CheckRadioButton(g_hwnd, ID_OP0, ID_OP0 + 5, ID_OP0 + op);
+    for (int i = 0; i < 6; i++) InvalidateRect(Ctl(ID_OP0 + i), NULL, FALSE);
     SetDlgItemTextW(g_hwnd, ID_DESC, desc[op]);
     ShowCtl(ID_LBL2, op == OP_C2C || op == OP_AUTH);
     ShowCtl(ID_COMBO2, op == OP_C2C);
@@ -1146,8 +1390,8 @@ static void ApplyOp(int op) {
     ShowCtl(ID_RADA, op == OP_RECOVER);
     ShowCtl(ID_RADB, op == OP_RECOVER);
     EnableCtl(ID_CHK1, TRUE);
-    CheckDlgButton(g_hwnd, ID_CHK1, BST_UNCHECKED);
-    CheckDlgButton(g_hwnd, ID_CHK2, BST_UNCHECKED);
+    SetChk(ID_CHK1, FALSE);
+    SetChk(ID_CHK2, FALSE);
     switch (op) {
     case OP_C2I:
         SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão de origem:");
@@ -1158,13 +1402,13 @@ static void ApplyOp(int op) {
         SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão de destino (SERÁ APAGADO):");
         SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Arquivo de imagem (.img, .iso, .bin):");
         SetDlgItemTextW(g_hwnd, ID_CHK1, L"Verificar depois de gravar (recomendado)");
-        CheckDlgButton(g_hwnd, ID_CHK1, BST_CHECKED);
+        SetChk(ID_CHK1, TRUE);
         break;
     case OP_C2C:
         SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão de origem:");
         SetDlgItemTextW(g_hwnd, ID_LBL2, L"Cartão de destino (SERÁ APAGADO):");
         SetDlgItemTextW(g_hwnd, ID_CHK1, L"Verificar depois de copiar (recomendado)");
-        CheckDlgButton(g_hwnd, ID_CHK1, BST_CHECKED);
+        SetChk(ID_CHK1, TRUE);
         break;
     case OP_VERIFY:
         SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão a verificar:");
@@ -1177,7 +1421,8 @@ static void ApplyOp(int op) {
         SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Pasta onde salvar os arquivos recuperados (NÃO use o próprio cartão):");
         SetDlgItemTextW(g_hwnd, ID_RADA, L"Recuperar arquivos apagados (fotos, vídeos MP4/MOV, PDF)");
         SetDlgItemTextW(g_hwnd, ID_RADB, L"Restaurar o cartão: apaga TUDO e formata de novo (corrige cartão RAW ou com capacidade errada)");
-        CheckRadioButton(g_hwnd, ID_RADA, ID_RADB, ID_RADA);
+        SetChk(ID_RADA, TRUE);
+        SetChk(ID_RADB, FALSE);
         break;
     case OP_AUTH:
         SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão a analisar:");
@@ -1187,6 +1432,7 @@ static void ApplyOp(int op) {
     }
     SetDlgItemTextW(g_hwnd, ID_EDITFILE, L"");
     UpdateEnable();
+    InvalidateRect(g_hwnd, NULL, TRUE);
 }
 
 static void AppendLog(const wchar_t *s) {
@@ -1204,7 +1450,7 @@ static void SetBusy(BOOL b) {
     EnableCtl(ID_CHK1, !b); EnableCtl(ID_CHK2, !b); EnableCtl(ID_RADA, !b); EnableCtl(ID_RADB, !b);
     EnableCtl(ID_START, !b);
     EnableCtl(ID_CANCELBTN, b);
-    if (b) { EnableCtl(ID_EDITFILE, FALSE); EnableCtl(ID_BROWSE, FALSE); EnableCtl(ID_LBLFILE, FALSE); }
+    if (b) { EnableCtl(ID_EDITFILE, FALSE); EnableCtl(ID_BROWSE, FALSE); g_fileOn = FALSE; InvalidateRect(Ctl(ID_LBLFILE), NULL, TRUE); }
     else UpdateEnable();
 }
 
@@ -1215,18 +1461,10 @@ static void UpdateProgress(void) {
     wcscpy(ph, g_phase);
     LeaveCriticalSection(&g_cs);
     if (g_indet) {
-        if (!g_marq) {
-            SetWindowLongPtrW(pb, GWL_STYLE, GetWindowLongPtrW(pb, GWL_STYLE) | PBS_MARQUEE);
-            SendMessageW(pb, PBM_SETMARQUEE, TRUE, 30);
-            g_marq = TRUE;
-        }
+        unsigned t = (unsigned)((GetTickCount64() / 12) % 2000);
+        SendMessageW(pb, PBM_SETPOS, t < 1000 ? t : 2000 - t, 0);
         SetDlgItemTextW(g_hwnd, ID_STATUS, ph);
         return;
-    }
-    if (g_marq) {
-        SendMessageW(pb, PBM_SETMARQUEE, FALSE, 0);
-        SetWindowLongPtrW(pb, GWL_STYLE, GetWindowLongPtrW(pb, GWL_STYLE) & ~PBS_MARQUEE);
-        g_marq = FALSE;
     }
     LONGLONG done = g_done, total = g_total;
     int pm = total > 0 ? (int)(done * 1000 / total) : 0;
@@ -1263,7 +1501,7 @@ static void StartJob(void) {
     g_t0 = GetTickCount64();
     g_thread = CreateThread(NULL, 0, Worker, NULL, 0, NULL);
     if (!g_thread) { Warn(L"Não foi possível iniciar a operação."); SetBusy(FALSE); return; }
-    SetTimer(g_hwnd, 1, 250, NULL);
+    SetTimer(g_hwnd, 1, 80, NULL);
 }
 
 static void CleanPath(wchar_t *p) {
@@ -1398,12 +1636,6 @@ static void OnBrowse(void) {
 static void OnDone(BOOL ok) {
     KillTimer(g_hwnd, 1);
     if (g_thread) { WaitForSingleObject(g_thread, 5000); CloseHandle(g_thread); g_thread = NULL; }
-    if (g_marq) {
-        HWND pb = Ctl(ID_PROGRESS);
-        SendMessageW(pb, PBM_SETMARQUEE, FALSE, 0);
-        SetWindowLongPtrW(pb, GWL_STYLE, GetWindowLongPtrW(pb, GWL_STYLE) & ~PBS_MARQUEE);
-        g_marq = FALSE;
-    }
     SendMessageW(Ctl(ID_PROGRESS), PBM_SETPOS, ok ? 1000 : (int)(g_total > 0 ? g_done * 1000 / g_total : 0), 0);
     SetDlgItemTextW(g_hwnd, ID_STATUS, ok ? L"Concluído." : L"Não concluído — veja o registro abaixo.");
     SetBusy(FALSE);
@@ -1412,49 +1644,79 @@ static void OnDone(BOOL ok) {
     if (g_summary[0]) MessageBoxW(g_hwnd, g_summary, APP_TITLE, MB_OK | g_summaryIcon);
 }
 
+#define HDR 40
 static HWND mk(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int w, int h, int id, DWORD ex) {
-    return CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, S(x), S(y), S(w), S(h), g_hwnd, (HMENU)(INT_PTR)id, g_inst, NULL);
+    return CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, S(x), S(y + HDR), S(w), S(h), g_hwnd, (HMENU)(INT_PTR)id, g_inst, NULL);
 }
 
 static BOOL CALLBACK SetFontCb(HWND h, LPARAM f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); return TRUE; }
 
 static void CreateUi(void) {
     static const wchar_t *ops[] = {L"Cartão → Imagem", L"Imagem → Cartão", L"Cartão → Cartão", L"Verificar cartão", L"Recuperar cartão", L"Autenticidade"};
-    for (int i = 0; i < 6; i++)
-        mk(L"BUTTON", ops[i], BS_AUTORADIOBUTTON | BS_PUSHLIKE | BS_MULTILINE | WS_TABSTOP | (i == 0 ? WS_GROUP : 0), 10 + i * 103, 10, 101, 40, ID_OP0 + i, 0);
-    mk(L"STATIC", L"", SS_LEFT, 10, 56, 620, 34, ID_DESC, 0);
-    mk(L"STATIC", L"Cartão:", SS_LEFT, 10, 94, 360, 18, ID_LBL1, 0);
-    mk(L"BUTTON", L"Mostrar todos os discos (cuidado)", BS_AUTOCHECKBOX | WS_TABSTOP, 380, 92, 250, 20, ID_SHOWALL, 0);
-    mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 10, 114, 520, 240, ID_COMBO1, 0);
-    mk(L"BUTTON", L"Atualizar", BS_PUSHBUTTON | WS_TABSTOP, 540, 113, 90, 26, ID_REFRESH, 0);
-    mk(L"STATIC", L"", SS_LEFT, 10, 148, 620, 18, ID_LBL2, 0);
-    mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 10, 168, 520, 240, ID_COMBO2, 0);
-    mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 10, 168, 300, 240, ID_COMBOB, 0);
-    mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 320, 168, 210, 240, ID_COMBOC, 0);
-    mk(L"STATIC", L"", SS_LEFT, 10, 202, 620, 18, ID_LBLFILE, 0);
-    mk(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, 10, 222, 520, 24, ID_EDITFILE, WS_EX_CLIENTEDGE);
-    mk(L"BUTTON", L"Procurar...", BS_PUSHBUTTON | WS_TABSTOP, 540, 221, 90, 26, ID_BROWSE, 0);
-    mk(L"BUTTON", L"", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 256, 620, 20, ID_CHK1, 0);
-    mk(L"BUTTON", L"", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 280, 620, 20, ID_CHK2, 0);
-    mk(L"BUTTON", L"", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 10, 256, 620, 20, ID_RADA, 0);
-    mk(L"BUTTON", L"", BS_AUTORADIOBUTTON, 10, 280, 620, 20, ID_RADB, 0);
-    mk(L"BUTTON", L"Iniciar", BS_PUSHBUTTON | WS_TABSTOP, 10, 314, 200, 38, ID_START, 0);
-    mk(L"BUTTON", L"Cancelar", BS_PUSHBUTTON | WS_TABSTOP | WS_DISABLED, 220, 314, 120, 38, ID_CANCELBTN, 0);
-    HWND pb = mk(PROGRESS_CLASSW, L"", 0, 10, 364, 620, 22, ID_PROGRESS, 0);
-    SendMessageW(pb, PBM_SETRANGE32, 0, 1000);
-    mk(L"STATIC", L"Pronto. Confira sempre o disco selecionado antes de gravar.", SS_LEFT | SS_ENDELLIPSIS, 10, 390, 620, 20, ID_STATUS, 0);
-    HWND lg = mk(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP, 10, 416, 620, 184, ID_LOG, WS_EX_CLIENTEDGE);
-    SendMessageW(lg, EM_LIMITTEXT, 0x7FFFFFFE, 0);
-    for (int i = 0; i < NBRANDS; i++) SendMessageW(Ctl(ID_COMBOB), CB_ADDSTRING, 0, (LPARAM)BRANDS[i].name);
-    for (int i = 0; i < NCLASSES; i++) SendMessageW(Ctl(ID_COMBOC), CB_ADDSTRING, 0, (LPARAM)CLASSES[i].name);
-    SendMessageW(Ctl(ID_COMBOB), CB_SETCURSEL, 0, 0);
-    SendMessageW(Ctl(ID_COMBOC), CB_SETCURSEL, 0, 0);
     NONCLIENTMETRICSW ncm;
     memset(&ncm, 0, sizeof ncm);
     ncm.cbSize = sizeof ncm;
     SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0);
     g_font = CreateFontIndirectW(&ncm.lfMessageFont);
+    LOGFONTW lf = ncm.lfMessageFont;
+    lf.lfWeight = FW_SEMIBOLD;
+    g_fontB = CreateFontIndirectW(&lf);
+    lf = ncm.lfMessageFont;
+    wcscpy(lf.lfFaceName, L"Consolas");
+    g_fontMono = CreateFontIndirectW(&lf);
+    g_fontTitle = CreateFontW(-S(24), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    g_fontSmall = CreateFontW(-S(12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    g_brBg = CreateSolidBrush(CL_BG);
+    g_brInput = CreateSolidBrush(CL_INPUT);
+    g_brLog = CreateSolidBrush(CL_LOG);
+
+    CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_OWNERDRAW, 0, 0, S(640), S(HDR), g_hwnd, (HMENU)(INT_PTR)ID_HEADER, g_inst, NULL);
+    for (int i = 0; i < 6; i++)
+        mk(L"BUTTON", ops[i], BS_OWNERDRAW | WS_TABSTOP, 10 + i * 103, 10, 101, 40, ID_OP0 + i, 0);
+    mk(L"STATIC", L"", SS_LEFT, 10, 56, 620, 34, ID_DESC, 0);
+    mk(L"STATIC", L"Cartão:", SS_LEFT, 10, 94, 360, 18, ID_LBL1, 0);
+    mk(L"BUTTON", L"Mostrar todos os discos (cuidado)", BS_OWNERDRAW | WS_TABSTOP, 380, 92, 250, 20, ID_SHOWALL, 0);
+    DWORD cb = CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP;
+    mk(L"COMBOBOX", L"", cb, 10, 114, 520, 240, ID_COMBO1, 0);
+    mk(L"BUTTON", L"Atualizar", BS_OWNERDRAW | WS_TABSTOP, 540, 113, 90, 26, ID_REFRESH, 0);
+    mk(L"STATIC", L"", SS_LEFT, 10, 148, 620, 18, ID_LBL2, 0);
+    mk(L"COMBOBOX", L"", cb, 10, 168, 520, 240, ID_COMBO2, 0);
+    mk(L"COMBOBOX", L"", cb, 10, 168, 300, 240, ID_COMBOB, 0);
+    mk(L"COMBOBOX", L"", cb, 320, 168, 210, 240, ID_COMBOC, 0);
+    mk(L"STATIC", L"", SS_LEFT, 10, 202, 620, 18, ID_LBLFILE, 0);
+    HWND ed = mk(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, 10, 222, 520, 24, ID_EDITFILE, 0);
+    SendMessageW(ed, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(S(6), S(6)));
+    mk(L"BUTTON", L"Procurar...", BS_OWNERDRAW | WS_TABSTOP, 540, 221, 90, 26, ID_BROWSE, 0);
+    mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 10, 256, 620, 20, ID_CHK1, 0);
+    mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 10, 280, 620, 20, ID_CHK2, 0);
+    mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 10, 256, 620, 20, ID_RADA, 0);
+    mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 10, 280, 620, 20, ID_RADB, 0);
+    mk(L"BUTTON", L"Iniciar", BS_OWNERDRAW | WS_TABSTOP, 10, 314, 200, 38, ID_START, 0);
+    mk(L"BUTTON", L"Cancelar", BS_OWNERDRAW | WS_TABSTOP | WS_DISABLED, 220, 314, 120, 38, ID_CANCELBTN, 0);
+    HWND pb = mk(PROGRESS_CLASSW, L"", 0, 10, 364, 620, 22, ID_PROGRESS, 0);
+    SendMessageW(pb, PBM_SETRANGE32, 0, 1000);
+    mk(L"STATIC", L"Pronto. Confira sempre o disco selecionado antes de gravar.", SS_LEFT | SS_ENDELLIPSIS, 10, 390, 620, 20, ID_STATUS, 0);
+    HWND lg = mk(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP, 10, 416, 620, 150, ID_LOG, 0);
+    SendMessageW(lg, EM_LIMITTEXT, 0x7FFFFFFE, 0);
+    SendMessageW(lg, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(S(6), S(6)));
+    for (int i = 0; i < NBRANDS; i++) SendMessageW(Ctl(ID_COMBOB), CB_ADDSTRING, 0, (LPARAM)BRANDS[i].name);
+    for (int i = 0; i < NCLASSES; i++) SendMessageW(Ctl(ID_COMBOC), CB_ADDSTRING, 0, (LPARAM)CLASSES[i].name);
+    SendMessageW(Ctl(ID_COMBOB), CB_SETCURSEL, 0, 0);
+    SendMessageW(Ctl(ID_COMBOC), CB_SETCURSEL, 0, 0);
     EnumChildWindows(g_hwnd, SetFontCb, (LPARAM)g_font);
+    SendMessageW(lg, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
+    /* tema escuro nos controles que continuam nativos (combos, edit, barra de rolagem, progresso) */
+    SetTheme(Ctl(ID_COMBO1), L"DarkMode_CFD", NULL);
+    SetTheme(Ctl(ID_COMBO2), L"DarkMode_CFD", NULL);
+    SetTheme(Ctl(ID_COMBOB), L"DarkMode_CFD", NULL);
+    SetTheme(Ctl(ID_COMBOC), L"DarkMode_CFD", NULL);
+    SetTheme(ed, L"DarkMode_CFD", NULL);
+    SetTheme(lg, L"DarkMode_Explorer", NULL);
+    SetTheme(pb, L"", L"");
+    SendMessageW(pb, 0x2001 /* PBM_SETBKCOLOR */, 0, (LPARAM)CL_INPUT);
+    SendMessageW(pb, 0x0409 /* PBM_SETBARCOLOR */, 0, (LPARAM)CL_NEON);
+    static const int bids[] = {ID_OP0, ID_OP0 + 1, ID_OP0 + 2, ID_OP0 + 3, ID_OP0 + 4, ID_OP0 + 5, ID_REFRESH, ID_SHOWALL, ID_BROWSE, ID_CHK1, ID_CHK2, ID_RADA, ID_RADB, ID_START, ID_CANCELBTN};
+    for (int i = 0; i < (int)(sizeof bids / sizeof bids[0]); i++) SetWindowSubclass(Ctl(bids[i]), BtnSub, bids[i], 0);
 }
 
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -1470,14 +1732,64 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         int id = LOWORD(w), code = HIWORD(w);
         if (id >= ID_OP0 && id <= ID_OP0 + 5 && code == BN_CLICKED) { if (!g_busy) ApplyOp(id - ID_OP0); }
         else if (id == ID_REFRESH && code == BN_CLICKED) { if (!g_busy) RefreshDisks(); }
-        else if (id == ID_SHOWALL && code == BN_CLICKED) { if (!g_busy) RefreshDisks(); }
+        else if (id == ID_SHOWALL && code == BN_CLICKED) { if (!g_busy) { SetChk(ID_SHOWALL, !Checked(ID_SHOWALL)); RefreshDisks(); } }
         else if (id == ID_BROWSE && code == BN_CLICKED) OnBrowse();
-        else if ((id == ID_CHK1 || id == ID_CHK2 || id == ID_RADA || id == ID_RADB) && code == BN_CLICKED) UpdateEnable();
+        else if ((id == ID_CHK1 || id == ID_CHK2 || id == ID_RADA || id == ID_RADB) && code == BN_CLICKED) {
+            if (id == ID_RADA || id == ID_RADB) { SetChk(ID_RADA, id == ID_RADA); SetChk(ID_RADB, id == ID_RADB); }
+            else SetChk(id, !Checked(id));
+            UpdateEnable();
+        }
         else if (id == ID_START && code == BN_CLICKED) OnStart();
         else if (id == ID_CANCELBTN && code == BN_CLICKED) {
             if (g_busy) { g_cancel = 1; SetDlgItemTextW(h, ID_STATUS, L"Cancelando..."); }
         }
         return 0;
+    }
+    case WM_ERASEBKGND: {
+        HDC dc = (HDC)w;
+        RECT rc;
+        GetClientRect(h, &rc);
+        Fill(dc, rc, CL_BG);
+        static const int fr[] = {ID_COMBO1, ID_COMBO2, ID_COMBOB, ID_COMBOC, ID_EDITFILE, ID_LOG};
+        for (int i = 0; i < 6; i++) {
+            HWND c = Ctl(fr[i]);
+            if (!c || !(GetWindowLongW(c, GWL_STYLE) & WS_VISIBLE)) continue;
+            RECT r;
+            GetWindowRect(c, &r);
+            MapWindowPoints(NULL, h, (POINT *)&r, 2);
+            InflateRect(&r, 1, 1);
+            Frame(dc, r, fr[i] == ID_LOG ? CL_NEON2 : CL_EDGE);
+        }
+        return 1;
+    }
+    case WM_DRAWITEM: {
+        DRAWITEMSTRUCT *d = (DRAWITEMSTRUCT *)l;
+        if (d->CtlType == ODT_BUTTON) DrawButton(d);
+        else if (d->CtlType == ODT_COMBOBOX) DrawCombo(d);
+        else if (d->CtlType == ODT_STATIC) DrawHeader(d);
+        return TRUE;
+    }
+    case WM_MEASUREITEM: {
+        MEASUREITEMSTRUCT *mi = (MEASUREITEMSTRUCT *)l;
+        if (mi->CtlType == ODT_COMBOBOX) { mi->itemHeight = S(20); return TRUE; }
+        break;
+    }
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = (HDC)w;
+        HWND c = (HWND)l;
+        int id = GetDlgCtrlID(c);
+        if (m == WM_CTLCOLORLISTBOX) { SetTextColor(dc, CL_TXT); SetBkColor(dc, CL_INPUT); return (LRESULT)g_brInput; }
+        if (id == ID_LOG) { SetTextColor(dc, CL_LOGTXT); SetBkColor(dc, CL_LOG); return (LRESULT)g_brLog; }
+        if (id == ID_EDITFILE) { SetTextColor(dc, IsWindowEnabled(c) ? CL_TXT : CL_DIM); SetBkColor(dc, CL_INPUT); return (LRESULT)g_brInput; }
+        COLORREF tc = CL_TXT;
+        if (id == ID_STATUS) tc = RGB(110, 225, 255);
+        else if (id == ID_DESC) tc = RGB(150, 170, 205);
+        else if (id == ID_LBLFILE && !g_fileOn) tc = CL_DIM;
+        SetTextColor(dc, tc);
+        SetBkColor(dc, CL_BG);
+        return (LRESULT)g_brBg;
     }
     case WM_TIMER:
         if (w == 1) UpdateProgress();
@@ -1526,19 +1838,20 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hi;
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hbrBackground = CreateSolidBrush(CL_BG);
     wc.lpszClassName = L"SDCloneWnd";
     wc.hIcon = LoadIconW(hi, MAKEINTRESOURCEW(1));
     wc.hIconSm = wc.hIcon;
     RegisterClassExW(&wc);
-    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT rc = {0, 0, S(640), S(610)};
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    RECT rc = {0, 0, S(640), S(616)};
     AdjustWindowRect(&rc, style, FALSE);
     int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
     int sx = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
     if (sy < 0) sy = 0;
     HWND hw = CreateWindowExW(0, L"SDCloneWnd", L"SDCLONETOOLS — copiar, gravar, verificar, autenticar e recuperar cartões SD", style, sx, sy, ww, wh, NULL, NULL, hi, NULL);
     if (!hw) return 1;
+    DarkTitlebar(hw);
     ShowWindow(hw, show);
     UpdateWindow(hw);
     MSG msg;
