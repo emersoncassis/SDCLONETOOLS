@@ -3,8 +3,20 @@ name: build
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    paths:
+      - 'sdclone.c'
+      - 'core.h'
+      - 'sdclone.rc'
+      - 'sdclone.manifest'
+      - 'mkicon.py'
+      - 'build.sh'
+      - '.github/workflows/build.yml'
   pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versão da release (ex.: v1.1.0). Vazio = v1.0.<número da execução>'
+        required: false
 
 jobs:
   build:
@@ -30,10 +42,14 @@ jobs:
             SDCloneTools.exe
             SDCloneTools32.exe
 
-      - name: Publicar release (em tags v*)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publicar release
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.version || format('v1.0.{0}', github.run_number) }}
+          name: SDCLONETOOLS ${{ inputs.version || format('v1.0.{0}', github.run_number) }}
+          make_latest: true
+          generate_release_notes: true
           files: |
             SDCloneTools.exe
             SDCloneTools32.exe
