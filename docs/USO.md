@@ -18,13 +18,13 @@ Aplicativo simples para Windows (um único `.exe`, sem instalação) para **copi
 
 ## Como usar (passo a passo)
 
-1. Insira o cartão e abra o `SDCloneTools.exe`.
-2. Clique na função desejada no menu à esquerda.
-3. Escolha o cartão na lista. Se ele não aparecer, clique em **Atualizar**.
-4. Preencha o que a função pedir (arquivo de imagem, pasta etc.).
-5. Clique no botão azul (o nome muda conforme a função, por exemplo **Analisar cartão** ou **Criar backup**) e confirme o aviso. Toda operação que apaga dados mostra o disco escolhido e pede confirmação.
-6. Acompanhe a barra de progresso, a velocidade e o tempo restante. **Cancelar** interrompe a operação.
-7. Ao final, no Diagnóstico e na Proteção do cartão, aparece um veredito; use **Ver registro técnico** para o registro completo e **Alterar opções** para voltar ao formulário. Nas outras funções o registro aparece direto na tela.
+1. Insira o cartão e abra o `SDCloneTools.exe`. O app abre no **Diagnóstico**, já com o cartão encontrado. Com mais de um cartão, escolha na lista de cima; se ele não aparecer, clique em **Atualizar**. Conectou outro cartão com o app aberto? Ele é selecionado sozinho.
+2. Clique em **Iniciar diagnóstico**. A tela mostra cada etapa sendo feita.
+3. Veja o resultado: saúde à esquerda, conteúdo à direita e o **próximo passo** embaixo.
+4. Clique em **Próximo** para seguir a jornada: **Autenticidade** e depois **Desempenho**. A trilha no topo marca as etapas feitas e também pode ser clicada.
+5. As outras funções (backup, gravar imagem, clonar, recuperar, proteção) ficam no menu à esquerda. Toda operação que apaga dados mostra o disco escolhido e pede confirmação.
+6. **Ver registro técnico** mostra o registro completo; **Alterar opções** mostra as opções da função (no Diagnóstico, o teste de gravação).
+7. Antes de tirar o cartão, use **Remover com segurança**, no pé do menu.
 
 ## As funções
 
@@ -36,16 +36,13 @@ Primeira coisa a fazer com um cartão que dá problema. **Não apaga nada** (o t
 - Com **Testar gravação** marcado, grava 4 KB em 2 pontos com o padrão invertido, confere e restaura. Isso separa "cartão só de leitura" de "cartão que perde o que grava".
 - Lê o registro CID (fabricante e data) quando o cartão está em slot SD nativo.
 
-O resultado é um veredito em quatro linhas: **causa provável**, **o cartão tem conserto?**, **dá para salvar os dados?** e **o que fazer agora**. Se couber, aparece um botão para o próximo passo (fazer backup, recuperar arquivos, reconstruir partições etc.).
+O resultado vem numa página só:
 
-![Veredito do Diagnóstico](img/diagnostico-veredito.png)
+- **Saúde**: escudo verde (*Saudável*), laranja (*Atenção*) ou vermelho (*Com defeito*), com o estado da leitura, da gravação e das partições e o mapa de leitura.
+- **Conteúdo** (somente leitura; FAT, exFAT e ext2/3/4): gráfico de rosca com quanto está ocupado, as categorias com ícone, tamanho e quantidade (jogos, sistema e emulador, música, vídeo, fotos, documentos, programas e compactados), as extensões mais comuns, o **tipo de uso** do cartão (jogos e emulação, console/game stick, câmera, vídeos, música, documentos ou misto) e um selo dizendo se ele **serve para esse uso** (juntando a saúde e, se você já rodou o Desempenho nesse cartão, a velocidade medida).
+- **Próximo passo**: Autenticidade quando está tudo bem; backup, recuperação ou reparo quando há defeito.
 
-**Aba Conteúdo.** Depois da análise, o Diagnóstico também lê as pastas e arquivos do cartão (somente leitura; FAT, exFAT e ext2/3/4) e mostra na aba **Conteúdo**:
-- quanto do cartão está ocupado, em uma barra por tipo de arquivo, com o que está livre e o que está fora das partições;
-- os tipos: jogos (ROMs de emuladores), sistema e emulador (BIOS, saves, configurações, sistema Linux), música, vídeo, fotos, documentos, programas e compactados;
-- as extensões mais comuns (`.gba`, `.mp3`, `.jpg`...), com quantidade e tamanho;
-- o **tipo de uso** do cartão (jogos e emulação, console/game stick com sistema Linux, câmera, vídeos, música, documentos ou misto), pelas pastas (`roms`, `retroarch`, `DCIM`...) e pelas extensões;
-- se o cartão **serve para esse uso**, juntando o veredito de saúde e, se você já rodou o **Desempenho** nesse cartão, a velocidade medida.
+![Resultado do Diagnóstico](img/tela-diag.png)
 
 Cartões NTFS, criptografados ou com sistema desconhecido têm o conteúdo ignorado (o app avisa).
 

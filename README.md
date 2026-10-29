@@ -14,15 +14,31 @@ Arquivo único, sem instalação. Execute e aceite o pedido de administrador.
 
 ## Telas
 
-O menu à esquerda tem as funções; a área à direita mostra a tarefa e, no fim, o resultado.
+**1. Tela inicial**: o cartão encontrado e um botão para começar. A trilha no topo mostra a jornada Diagnóstico → Autenticidade → Desempenho.
+
+![Tela inicial](docs/img/tela-hero.png)
+
+**2. Diagnóstico em andamento**: cada etapa ganha um visto quando termina.
+
+![Diagnóstico em andamento](docs/img/tela-busy.png)
+
+**3. Resultado**: saúde à esquerda (escudo verde, laranja ou vermelho) e conteúdo à direita (gráfico do que tem dentro, tipo de uso e se o cartão serve para ele). Embaixo, o próximo passo.
+
+![Resultado do Diagnóstico](docs/img/tela-diag.png)
+
+Cartão com defeito: o próximo passo vira backup.
+
+![Cartão com defeito](docs/img/tela-diagbad.png)
+
+**4. Desempenho**: velocidades medidas, gráfico durante o teste e para que o cartão serve.
+
+![Desempenho](docs/img/tela-bench.png)
 
 **Proteção do cartão**: dois modos separados, leitor interno do computador ou Arduino/ESP32.
 
 ![Proteção do cartão](docs/img/protecao.png)
 
-**Diagnóstico**: o resultado vem como veredito (causa provável, se tem conserto, se dá para salvar os dados e o que fazer) e um mapa de leitura de 128 pontos do cartão.
-
-![Veredito do Diagnóstico](docs/img/diagnostico-veredito.png)
+> As telas acima foram geradas com dados de exemplo (`--demo`).
 
 ## Como usar (a jornada)
 
@@ -37,7 +53,7 @@ Para ver as telas sem mexer em nenhum cartão: `SDCloneTools.exe --demo=hero` (t
 
 | Função | Para que serve |
 |---|---|
-| **Diagnóstico** | Analisa o cartão sem apagar nada: tabela de partições, leitura em 128 pontos, teste opcional de gravação (grava 4 KB em 2 pontos e devolve o conteúdo original) e leitura do registro CID. Termina com um veredito claro (aba **Saúde**): causa provável, se o cartão tem conserto, se dá para salvar os dados e o que fazer agora. A aba **Conteúdo** mostra quanto do cartão está ocupado, em gráfico, os tipos de arquivo (jogos, sistema e emulador, música, vídeo, fotos, documentos...), as extensões mais comuns, o tipo de uso do cartão (game stick, câmera, música...) e se ele serve para esse uso |
+| **Diagnóstico** | Analisa o cartão sem apagar nada: tabela de partições, leitura em 128 pontos, teste opcional de gravação (grava 4 KB em 2 pontos e devolve o conteúdo original) e leitura do registro CID. Mostra numa página só a **saúde** (escudo com leitura, gravação e partições) e o **conteúdo**: quanto do cartão está ocupado, em gráfico, os tipos de arquivo (jogos, sistema e emulador, música, vídeo, fotos, documentos...), as extensões mais comuns, o tipo de uso do cartão (game stick, câmera, música...) e se ele serve para esse uso. Termina com o próximo passo |
 | **Desempenho** | Mede leitura e gravação sequencial e de 4 KB, mostra a velocidade durante o teste e diz se o cartão é bom para game stick, para fotos e vídeo (Full HD/4K) ou se é um cartão genérico em que não dá para confiar |
 | **Proteção do cartão** | Lê os bits de proteção contra gravação (CSD) e o bloqueio por senha, para saber se o cartão está travado por proteção ou pelo firmware. Tem dois modos, descritos abaixo |
 | **Recuperar e reparar** | Análise de partições, ver e copiar arquivos (inclusive ext4 de consoles), reconstruir partições perdidas sem apagar dados, procurar arquivos apagados (de uma imagem ou do cartão) e restaurar o cartão |
