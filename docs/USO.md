@@ -19,45 +19,74 @@ Aplicativo simples para Windows (um único `.exe`, sem instalação) para **copi
 ## Como usar (passo a passo)
 
 1. Insira o cartão e abra o `SDCloneTools.exe`.
-2. Clique na função desejada nos botões do topo.
+2. Clique na função desejada no menu à esquerda.
 3. Escolha o cartão na lista. Se ele não aparecer, clique em **Atualizar**.
 4. Preencha o que a função pedir (arquivo de imagem, pasta etc.).
-5. Clique em **Iniciar** e confirme o aviso. Toda operação que apaga dados mostra o disco escolhido e pede confirmação.
+5. Clique no botão azul (o nome muda conforme a função, por exemplo **Analisar cartão** ou **Criar backup**) e confirme o aviso. Toda operação que apaga dados mostra o disco escolhido e pede confirmação.
 6. Acompanhe a barra de progresso, a velocidade e o tempo restante. **Cancelar** interrompe a operação.
-7. Ao final aparece uma mensagem com o resultado. O registro completo fica na caixa de texto no rodapé.
+7. Ao final, no Diagnóstico e na Proteção do cartão, aparece um veredito; use **Ver registro técnico** para o registro completo e **Alterar opções** para voltar ao formulário. Nas outras funções o registro aparece direto na tela.
 
 ## As funções
 
-### Cartão → Imagem
+### Diagnóstico
+Primeira coisa a fazer com um cartão que dá problema. **Não apaga nada** (o teste de gravação devolve o conteúdo original).
+
+- Lê a tabela de partições e reconhece o sistema de arquivos.
+- Lê 128 pontos do cartão, do início ao fim, e marca no mapa: com dados, vazio, lento (mais de 1 s) ou ilegível.
+- Com **Testar gravação** marcado, grava 4 KB em 2 pontos com o padrão invertido, confere e restaura. Isso separa "cartão só de leitura" de "cartão que perde o que grava".
+- Lê o registro CID (fabricante e data) quando o cartão está em slot SD nativo.
+
+O resultado é um veredito em quatro linhas: **causa provável**, **o cartão tem conserto?**, **dá para salvar os dados?** e **o que fazer agora**. Se couber, aparece um botão para o próximo passo (fazer backup, recuperar arquivos, reconstruir partições etc.).
+
+![Veredito do Diagnóstico](img/diagnostico-veredito.png)
+
+### Proteção do cartão
+Descobre **por que o cartão não deixa gravar**. Escolha o modo no topo da tela.
+
+**Leitor interno do computador.** Só funciona no slot de cartão SD do notebook ou PC, e só se o driver permitir. Usa o canal de comandos SD do Windows para ler o CSD e o CID e ver se o cartão está bloqueado por senha. Não altera nada. Se o cartão estiver num leitor USB, o app avisa e indica o modo Arduino.
+
+**Arduino ou ESP32 conectado por USB.** O app lista as portas USB, marca as que parecem Arduino/ESP32 e confirma que a placa tem o programa do SD Clone Tools. Fala direto com o cartão e, além de ler os registros:
+- testa a gravação em 1 bloco e devolve o conteúdo original;
+- com **Tentar desligar a proteção temporária** marcado (o app pede confirmação), limpa o bit TMP_WRITE_PROTECT. A proteção **permanente** nunca é alterada.
+
+Ligação dos fios, como gravar o programa na placa e a tabela de resultados: [arduino/LEIA.md](../arduino/LEIA.md).
+
+| Resultado | Significado |
+|---|---|
+| Proteção temporária ligada | Pode ser desligada pelo modo Arduino |
+| Proteção permanente ligada | Definitiva. Faça backup |
+| Bloqueado por senha | Remova a senha no aparelho que a colocou |
+| Firmware travado em somente leitura | Nenhum bit ligado, mas a controladora recusa gravar. Sem conserto por software. Faça backup |
+| Grava normalmente pelo Arduino | O cartão está bom; o problema é o leitor ou adaptador do PC |
+
+![Proteção do cartão](img/protecao.png)
+
+### Fazer backup (cartão para imagem)
 Cria um arquivo `.img` com uma cópia exata, setor por setor, de todo o cartão. Serve para backup ou para clonar depois.
 - Escolha o cartão e o local do arquivo `.img` (precisa ter espaço livre igual ao tamanho do cartão).
 - Opção **Verificar a imagem depois de criar**: compara o arquivo com o cartão (demora o dobro).
 - Setores ilegíveis são gravados como zeros e contados no resultado.
 - Não salve a imagem dentro do próprio cartão (o app bloqueia).
 
-### Imagem → Cartão
+### Gravar imagem (imagem para cartão)
 Grava um arquivo `.img`, `.iso` ou `.bin` no cartão. **Apaga todo o conteúdo do cartão.**
 - Escolha o cartão de destino e o arquivo de imagem (deve caber no cartão).
 - Mantenha marcado **Verificar depois de gravar** (recomendado).
 - Se o Windows pedir para formatar o disco ao final, clique em **Cancelar**.
 
-### Cartão → Cartão
+### Clonar cartão
 Clona direto de um cartão para outro. **Apaga todo o conteúdo do destino.**
 - Escolha origem e destino. Normalmente o destino deve ser **igual ou maior** que a origem. Se for maior, o espaço extra fica sem partição.
-- **Copiar só os dados (destino menor):** marque a opção quando o destino for menor mas os dados caibam nele. O app analisa a origem e escolhe sozinho:
-  - se as **partições** ocupam menos que o destino (ex.: imagem de 8 GB em cartão de 64 GB), copia exatamente só essa área (cópia fiel, serve para sistemas de consoles);
-  - se a partição é **maior que o destino** mas tem uma única partição FAT/exFAT, formata o destino e copia os **arquivos** (datas e atributos não são preservados; não serve para cartão bootável);
-  - cartões com ext4/Linux ou GPT que não cabem no destino não podem ser reduzidos com segurança; o app explica e não altera nada.
-- Dica: com um só leitor, use Cartão → Imagem e depois Imagem → Cartão.
+- Dica: com um só leitor, use Fazer backup e depois Gravar imagem.
 
-### Verificar cartão
+### Verificar setores
 - **Leitura completa:** lê o cartão inteiro procurando setores ilegíveis e mostra a velocidade média. Não altera nada.
 - **Comparar com imagem:** marque a opção e escolha um `.img` para ver se o cartão é idêntico a ele.
 - **Teste de capacidade real (estilo H2testw):** grava dados em todo o cartão e confere se voltam idênticos. **APAGA o cartão** e pode levar horas. É o único teste que prova a capacidade verdadeira.
 
 > A leitura completa não prova a capacidade. Um cartão falso lê sem erros. Para isso, use o teste de capacidade ou a **Autenticidade**.
 
-### Recuperar cartão (reparar cartão sem acesso ou com capacidade errada)
+### Recuperar e reparar
 Escolha o que fazer na lista **"O que fazer com o cartão"**. Se não sabe o que está errado, comece pelo **1. Diagnosticar**.
 
 **1. Diagnosticar o cartão** (não altera nada). Lê a tabela de partições (MBR/GPT), reconhece os sistemas de arquivos (FAT, exFAT, NTFS, ext2/3/4...), procura partições perdidas e explica no registro e na janela final **por que** o cartão está assim. Exemplos de resultado:
@@ -108,7 +137,7 @@ Ajuda a descobrir se o cartão é original ou falsificado.
 | Capacidade real menor que a anunciada | **Cartão falso** (o app mostra a capacidade real estimada) |
 | Velocidade de gravação abaixo da classe anunciada | Suspeito, ou cartão desgastado, ou leitor USB lento |
 
-Depois do teste completo, use **Recuperar cartão → 5. Restaurar** para formatar o cartão de novo.
+Depois do teste completo, use **Recuperar e reparar → Restaurar cartão** para formatar o cartão de novo.
 
 ## Limites importantes
 

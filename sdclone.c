@@ -14,7 +14,6 @@
 #include <wchar.h>
 #include "core.h"
 #include "diag.h"
-#define HDR 40
 
 #define APP_TITLE L"SDCLONETOOLS"
 #define CHUNK (4u * 1024 * 1024)
@@ -23,13 +22,13 @@
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 
-enum { OP_C2I = 0, OP_I2C, OP_C2C, OP_VERIFY, OP_RECOVER, OP_AUTH };
+enum { OP_C2I = 0, OP_I2C, OP_C2C, OP_VERIFY, OP_RECOVER, OP_AUTH, OP_DIAG, OP_CSD, OP_COUNT };
 
 enum {
-    ID_OP0 = 100, /* 100..105 */
+    ID_OP0 = 100, /* 100..107 */
     ID_DESC = 120, ID_LBL1, ID_COMBO1, ID_REFRESH, ID_SHOWALL, ID_LBL2, ID_COMBO2, ID_COMBOB, ID_COMBOC,
     ID_LBLFILE, ID_EDITFILE, ID_BROWSE, ID_CHK1, ID_CHK2, ID_RADA, ID_RADB,
-    ID_START, ID_CANCELBTN, ID_PROGRESS, ID_STATUS, ID_LOG, ID_HEADER,
+    ID_START, ID_CANCELBTN, ID_PROGRESS, ID_STATUS, ID_LOG, ID_HEADER, ID_TITLE, ID_WARN, ID_RESULT, ID_NEXT, ID_LOGBTN, ID_COMBOP, ID_DETECT, ID_OPTS,
     ID_BR_PART = 300, ID_BR_LBL, ID_BR_PATH, ID_BR_LIST, ID_BR_INFO, ID_BR_UP, ID_BR_COPYSEL, ID_BR_COPYALL, ID_BR_CANCEL, ID_BR_CLOSE
 };
 
@@ -47,7 +46,7 @@ typedef struct {
     int op, mode, src, dst;
     uint64_t srcSize, dstSize;
     uint32_t srcSec, dstSec;
-    wchar_t file[MAX_PATH];
+    wchar_t file[MAX_PATH], img[MAX_PATH];
     BOOL verify;
     int brand, cls;
     DiskInfo di;
@@ -105,22 +104,79 @@ static const struct { const wchar_t *name; int mbs; } CLASSES[] = {
 /* ----------------------------------------------------------------- utilitários */
 static HWND Ctl(int id) { return GetDlgItem(g_hwnd, id); }
 
-/* ============================ TEMA DARK / NEON ============================ */
-#define CL_BG     RGB(8, 12, 24)
-#define CL_PANEL  RGB(14, 22, 42)
-#define CL_PANEL2 RGB(16, 44, 82)
-#define CL_EDGE   RGB(34, 54, 96)
-#define CL_NEON   RGB(0, 212, 255)
-#define CL_NEON2  RGB(30, 144, 255)
-#define CL_TXT    RGB(214, 230, 255)
-#define CL_DIM    RGB(96, 116, 150)
-#define CL_DANGER RGB(255, 84, 112)
-#define CL_INPUT  RGB(10, 17, 34)
-#define CL_LOG    RGB(6, 10, 20)
-#define CL_LOGTXT RGB(120, 220, 255)
+/* ================== TEMA: segue o modo claro/escuro do Windows (estilo Windows 11) ================== */
+typedef struct {
+    COLORREF bg, panel, edge, input, txt, dim, accent, accentHot, accentDown, onAccent,
+        navSel, navHot, btn, btnHot, btnDown, btnEdge, disFill, disTxt, chkEdge,
+        danger, warnBg, warnEdge, ok, okBg, caution, cautionBg, log, logTxt, empty;
+} Pal;
+static Pal g_pal;
+static BOOL g_dark;
+#define CL_BG     g_pal.bg
+#define CL_PANEL  g_pal.panel
+#define CL_EDGE   g_pal.edge
+#define CL_INPUT  g_pal.input
+#define CL_TXT    g_pal.txt
+#define CL_DIM    g_pal.dim
+#define CL_NEON   g_pal.accent
+#define CL_DANGER g_pal.danger
+#define CL_LOG    g_pal.log
+#define CL_LOGTXT g_pal.logTxt
+#define CL_NONE   0xFFFFFFFFu
 
-static HBRUSH g_brBg, g_brInput, g_brLog;
-static HFONT g_fontB, g_fontMono, g_fontTitle, g_fontSmall;
+static void LoadPalette(void) {
+    static const Pal L = {
+        RGB(243, 243, 243), RGB(251, 251, 251), RGB(229, 229, 229), RGB(255, 255, 255), RGB(27, 27, 27), RGB(96, 96, 96),
+        RGB(0, 95, 184), RGB(25, 110, 191), RGB(50, 125, 198), RGB(255, 255, 255),
+        RGB(233, 233, 233), RGB(237, 237, 237), RGB(253, 253, 253), RGB(246, 246, 246), RGB(240, 240, 240), RGB(213, 213, 213),
+        RGB(197, 197, 197), RGB(255, 255, 255), RGB(138, 138, 138),
+        RGB(196, 43, 28), RGB(253, 231, 233), RGB(240, 205, 208), RGB(15, 123, 15), RGB(223, 246, 221),
+        RGB(157, 93, 0), RGB(255, 244, 206), RGB(255, 255, 255), RGB(52, 52, 52), RGB(214, 214, 214)};
+    static const Pal D = {
+        RGB(32, 32, 32), RGB(43, 43, 43), RGB(29, 29, 29), RGB(36, 36, 36), RGB(255, 255, 255), RGB(176, 176, 176),
+        RGB(96, 205, 255), RGB(88, 186, 232), RGB(80, 166, 207), RGB(0, 0, 0),
+        RGB(45, 45, 45), RGB(41, 41, 41), RGB(45, 45, 45), RGB(50, 50, 50), RGB(39, 39, 39), RGB(60, 60, 60),
+        RGB(67, 67, 67), RGB(160, 160, 160), RGB(160, 160, 160),
+        RGB(255, 153, 164), RGB(68, 39, 38), RGB(92, 52, 50), RGB(108, 203, 95), RGB(57, 61, 27),
+        RGB(252, 225, 0), RGB(67, 53, 25), RGB(28, 28, 28), RGB(214, 214, 214), RGB(75, 75, 75)};
+    DWORD v = 1, sz = sizeof v;
+    g_dark = (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                           L"AppsUseLightTheme", RRF_RT_REG_DWORD, NULL, &v, &sz) == ERROR_SUCCESS && v == 0);
+    g_pal = g_dark ? D : L;
+}
+
+/* geometria (pixels lógicos; S() escala) */
+#define WIN_W 1000
+#define WIN_H 688
+#define NAV_W 240
+#define MX 256
+#define MW 720
+#define DEV_Y 72
+#define DEV_H 76
+#define TASK_Y 164
+#define CARD_PAD 16
+#define NAV_Y0 52
+#define NAV_SEP_Y 260
+#define NAV_Y1 272
+
+/* resultado do diagnóstico (preenchido pela thread de trabalho, lido pela interface ao terminar) */
+enum { NX_NONE = 0, NX_BACKUP, NX_CARVE, NX_REBUILD, NX_RESTORE, NX_AUTH };
+enum { MC_DATA = 0, MC_EMPTY, MC_SLOW, MC_BAD, MC_SKIP };
+#define MAP_N 128
+typedef struct {
+    BOOL valid, map;
+    int op, level, next; /* level: 0 ok, 1 atenção, 2 grave */
+    wchar_t title[160], cause[400], card[300], data[300], todo[300];
+    uint8_t cell[MAP_N];
+    int nData, nEmpty, nSlow, nBad, nSkip;
+} Verdict;
+static Verdict g_vd;
+static BOOL g_showLog = FALSE;
+static const wchar_t *NX_TEXT[] = {L"", L"Fazer backup agora", L"Recuperar arquivos", L"Reconstruir partições", L"Restaurar o cartão", L"Testar autenticidade"};
+
+static HBRUSH g_brBg, g_brInput, g_brLog, g_brCard;
+static HFONT g_fontB, g_fontMono, g_fontTitle, g_fontSmall, g_fontH, g_fontVal, g_fontValB;
+static HFONT g_fontIcon, g_fontIconM, g_fontIconL; /* NULL se o Windows não tiver fonte de ícones */
 static int g_hover = 0;
 static BOOL g_fileOn = TRUE;
 static BOOL g_chk[512];
@@ -149,14 +205,62 @@ static void DarkTitlebar(HWND h) {
     if (!m) return;
     F f = (F)GetProcAddress(m, "DwmSetWindowAttribute");
     if (!f) return;
-    BOOL on = TRUE;
+    BOOL on = g_dark;
     if (FAILED(f(h, 20, &on, sizeof on))) f(h, 19, &on, sizeof on);
     COLORREF c = CL_BG;
-    f(h, 35, &c, sizeof c);
-    c = CL_NEON2;
-    f(h, 34, &c, sizeof c);
+    f(h, 35, &c, sizeof c); /* barra de título na mesma cor da janela */
     c = CL_TXT;
     f(h, 36, &c, sizeof c);
+}
+
+/* ---------------------------------------------------------------- GDI+ (cantos arredondados suaves) */
+typedef struct { UINT32 ver; void *cb; BOOL noThread, noCodecs; } GpStartIn;
+static HMODULE g_gpDll;
+static ULONG_PTR g_gpTok;
+static BOOL g_gpOk;
+static int(WINAPI *pGpStartup)(ULONG_PTR *, const GpStartIn *, void *);
+static void(WINAPI *pGpShutdown)(ULONG_PTR);
+static int(WINAPI *pGpFromHdc)(HDC, void **);
+static int(WINAPI *pGpDelG)(void *);
+static int(WINAPI *pGpSmooth)(void *, int);
+static int(WINAPI *pGpNewPath)(int, void **);
+static int(WINAPI *pGpDelPath)(void *);
+static int(WINAPI *pGpArc)(void *, float, float, float, float, float, float);
+static int(WINAPI *pGpClose)(void *);
+static int(WINAPI *pGpNewBrush)(UINT32, void **);
+static int(WINAPI *pGpDelBrush)(void *);
+static int(WINAPI *pGpNewPen)(UINT32, float, int, void **);
+static int(WINAPI *pGpDelPen)(void *);
+static int(WINAPI *pGpFillPath)(void *, void *, void *);
+static int(WINAPI *pGpDrawPath)(void *, void *, void *);
+static int(WINAPI *pGpDrawLine)(void *, void *, float, float, float, float);
+static int(WINAPI *pGpFillEll)(void *, void *, float, float, float, float);
+
+#define ARGB(c) (0xFF000000u | ((UINT32)GetRValue(c) << 16) | ((UINT32)GetGValue(c) << 8) | (UINT32)GetBValue(c))
+#define GPF(v, n) (*(FARPROC *)&(v) = GetProcAddress(g_gpDll, n))
+
+static void GpInit(void) {
+    g_gpDll = LoadLibraryW(L"gdiplus.dll");
+    if (!g_gpDll) return;
+    GPF(pGpStartup, "GdiplusStartup"); GPF(pGpShutdown, "GdiplusShutdown");
+    GPF(pGpFromHdc, "GdipCreateFromHDC"); GPF(pGpDelG, "GdipDeleteGraphics"); GPF(pGpSmooth, "GdipSetSmoothingMode");
+    GPF(pGpNewPath, "GdipCreatePath"); GPF(pGpDelPath, "GdipDeletePath"); GPF(pGpArc, "GdipAddPathArc");
+    GPF(pGpClose, "GdipClosePathFigure");
+    GPF(pGpNewBrush, "GdipCreateSolidFill"); GPF(pGpDelBrush, "GdipDeleteBrush");
+    GPF(pGpNewPen, "GdipCreatePen1"); GPF(pGpDelPen, "GdipDeletePen");
+    GPF(pGpFillPath, "GdipFillPath"); GPF(pGpDrawPath, "GdipDrawPath"); GPF(pGpDrawLine, "GdipDrawLine");
+    GPF(pGpFillEll, "GdipFillEllipse");
+    if (!pGpStartup || !pGpShutdown || !pGpFromHdc || !pGpDelG || !pGpSmooth || !pGpNewPath || !pGpDelPath || !pGpArc ||
+        !pGpClose || !pGpNewBrush || !pGpDelBrush || !pGpNewPen || !pGpDelPen || !pGpFillPath || !pGpDrawPath ||
+        !pGpDrawLine || !pGpFillEll)
+        return;
+    GpStartIn in = {1, NULL, FALSE, FALSE};
+    if (pGpStartup(&g_gpTok, &in, NULL) == 0) g_gpOk = TRUE;
+}
+
+static void GpDone(void) {
+    if (g_gpOk) pGpShutdown(g_gpTok);
+    g_gpOk = FALSE;
 }
 
 static void Fill(HDC dc, RECT r, COLORREF c) {
@@ -176,6 +280,110 @@ static void Txt(HDC dc, const wchar_t *t, RECT *r, UINT fl, COLORREF c, HFONT f)
     DrawTextW(dc, t, -1, r, fl);
     SelectObject(dc, o);
 }
+static void Glyph(HDC dc, wchar_t g, RECT *r, COLORREF c, HFONT f) {
+    if (!f) return;
+    wchar_t s[2] = {g, 0};
+    Txt(dc, s, r, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, c, f);
+}
+
+/* retângulo arredondado com preenchimento e borda opcionais (CL_NONE = sem) */
+static void RRect(HDC dc, RECT r, int rad, COLORREF fill, COLORREF border) {
+    if (g_gpOk) {
+        void *g = NULL, *p = NULL, *br = NULL, *pn = NULL;
+        if (pGpFromHdc(dc, &g) != 0) return;
+        pGpSmooth(g, 4);
+        float x = (float)r.left + 0.5f, y = (float)r.top + 0.5f, w = (float)(r.right - r.left) - 1.0f, h = (float)(r.bottom - r.top) - 1.0f;
+        float d = (float)rad * 2.0f;
+        if (d > w) d = w;
+        if (d > h) d = h;
+        if (d < 1.0f) d = 1.0f;
+        pGpNewPath(0, &p);
+        pGpArc(p, x, y, d, d, 180, 90);
+        pGpArc(p, x + w - d, y, d, d, 270, 90);
+        pGpArc(p, x + w - d, y + h - d, d, d, 0, 90);
+        pGpArc(p, x, y + h - d, d, d, 90, 90);
+        pGpClose(p);
+        if (fill != CL_NONE) {
+            pGpNewBrush(ARGB(fill), &br);
+            pGpFillPath(g, br, p);
+            pGpDelBrush(br);
+        }
+        if (border != CL_NONE) {
+            pGpNewPen(ARGB(border), 1.0f, 2, &pn);
+            pGpDrawPath(g, pn, p);
+            pGpDelPen(pn);
+        }
+        pGpDelPath(p);
+        pGpDelG(g);
+    } else {
+        HBRUSH b = fill != CL_NONE ? CreateSolidBrush(fill) : (HBRUSH)GetStockObject(NULL_BRUSH);
+        HPEN pn = border != CL_NONE ? CreatePen(PS_SOLID, 1, border) : (HPEN)GetStockObject(NULL_PEN);
+        HGDIOBJ o1 = SelectObject(dc, b), o2 = SelectObject(dc, pn);
+        RoundRect(dc, r.left, r.top, r.right, r.bottom, rad * 2, rad * 2);
+        SelectObject(dc, o1);
+        SelectObject(dc, o2);
+        if (fill != CL_NONE) DeleteObject(b);
+        if (border != CL_NONE) DeleteObject(pn);
+    }
+}
+
+static void Disc(HDC dc, int cx, int cy, int rad, COLORREF c) {
+    if (g_gpOk) {
+        void *g = NULL, *br = NULL;
+        if (pGpFromHdc(dc, &g) != 0) return;
+        pGpSmooth(g, 4);
+        pGpNewBrush(ARGB(c), &br);
+        pGpFillEll(g, br, (float)(cx - rad), (float)(cy - rad), (float)(rad * 2), (float)(rad * 2));
+        pGpDelBrush(br);
+        pGpDelG(g);
+    } else {
+        HBRUSH b = CreateSolidBrush(c);
+        HPEN pn = CreatePen(PS_SOLID, 1, c);
+        HGDIOBJ o1 = SelectObject(dc, b), o2 = SelectObject(dc, pn);
+        Ellipse(dc, cx - rad, cy - rad, cx + rad, cy + rad);
+        SelectObject(dc, o1);
+        SelectObject(dc, o2);
+        DeleteObject(b);
+        DeleteObject(pn);
+    }
+}
+
+static void Tick(HDC dc, float x1, float y1, float x2, float y2, float x3, float y3, float wpx, COLORREF c) {
+    if (g_gpOk) {
+        void *g = NULL, *pn = NULL;
+        if (pGpFromHdc(dc, &g) != 0) return;
+        pGpSmooth(g, 4);
+        pGpNewPen(ARGB(c), wpx, 2, &pn);
+        pGpDrawLine(g, pn, x1, y1, x2, y2);
+        pGpDrawLine(g, pn, x2, y2, x3, y3);
+        pGpDelPen(pn);
+        pGpDelG(g);
+    } else {
+        HPEN pn = CreatePen(PS_SOLID, (int)wpx, c);
+        HGDIOBJ o = SelectObject(dc, pn);
+        MoveToEx(dc, (int)x1, (int)y1, NULL);
+        LineTo(dc, (int)x2, (int)y2);
+        LineTo(dc, (int)x3, (int)y3);
+        SelectObject(dc, o);
+        DeleteObject(pn);
+    }
+}
+
+/* ---------------------------------------------------------------- textos */
+/* indexados por operação: C2I, I2C, C2C, VERIFY, RECOVER, AUTH, DIAG */
+static const wchar_t *NAV_T[] = {L"Fazer backup", L"Gravar imagem", L"Clonar cartão", L"Verificar setores", L"Recuperar e reparar", L"Autenticidade", L"Diagnóstico", L"Proteção do cartão"};
+static const wchar_t NAV_G[] = {0xE74E, 0xE896, 0xE8C8, 0xE721, 0xE90F, 0xEA18, 0xE9D9, 0xE72E};
+static const int NAV_ORDER[] = {OP_DIAG, OP_CSD, OP_RECOVER, OP_AUTH, OP_VERIFY, OP_C2I, OP_I2C, OP_C2C};
+static const wchar_t *START_T[] = {L"Criar backup", L"Gravar no cartão", L"Clonar cartão", L"Iniciar verificação", L"Iniciar", L"Analisar cartão", L"Analisar cartão", L"Ler proteção"};
+static const wchar_t *RECOVER_START[] = {L"Analisar partições", L"Abrir arquivos", L"Reconstruir partições", L"Procurar arquivos", L"Restaurar cartão"};
+
+static int NavY(int slot) { return slot < 5 ? NAV_Y0 + slot * 40 : NAV_Y1 + (slot - 5) * 40; }
+
+static COLORREF BtnBg(int id) {
+    if (id >= ID_OP0 && id < ID_OP0 + OP_COUNT) return CL_BG;
+    if (id == ID_CHK1 || id == ID_CHK2 || id == ID_RADA || id == ID_RADB || id == ID_SHOWALL || id == ID_REFRESH || id == ID_BROWSE || id == ID_DETECT) return CL_PANEL;
+    return CL_BG;
+}
 
 static void DrawButton(DRAWITEMSTRUCT *d) {
     int id = (int)d->CtlID, w = d->rcItem.right - d->rcItem.left, h = d->rcItem.bottom - d->rcItem.top;
@@ -187,77 +395,64 @@ static void DrawButton(DRAWITEMSTRUCT *d) {
     BOOL hot = (g_hover == id) && !dis, foc = (d->itemState & ODS_FOCUS) != 0 && !dis;
     wchar_t t[200];
     GetWindowTextW(d->hwndItem, t, 200);
-    Fill(dc, r, CL_BG);
-    if (id >= ID_OP0 && id <= ID_OP0 + 5) {
-        BOOL on = (id - ID_OP0 == g_op);
-        Fill(dc, r, on ? CL_PANEL2 : (hot ? RGB(20, 34, 64) : CL_PANEL));
-        Frame(dc, r, on ? (dis ? CL_NEON2 : CL_NEON) : (hot ? CL_NEON2 : CL_EDGE));
+    Fill(dc, r, BtnBg(id));
+    if (id >= ID_OP0 && id < ID_OP0 + OP_COUNT) {
+        /* item do menu de navegação */
+        int op = id - ID_OP0;
+        BOOL on = (op == g_op);
+        if (on || hot || sel) RRect(dc, r, S(4), (on || sel) ? g_pal.navSel : g_pal.navHot, CL_NONE);
+        else if (foc) RRect(dc, r, S(4), CL_NONE, g_pal.btnEdge);
         if (on) {
-            RECT b = {0, h - S(3), w, h};
-            Fill(dc, b, dis ? CL_NEON2 : CL_NEON);
+            RECT bar = {0, h / 2 - S(8), S(3), h / 2 + S(8)};
+            RRect(dc, bar, S(1), CL_NEON, CL_NONE);
         }
-        RECT tr = {S(4), 0, w - S(4), h - S(3)}, cr = tr;
-        SelectObject(dc, g_fontB);
-        DrawTextW(dc, t, -1, &cr, DT_CALCRECT | DT_WORDBREAK | DT_CENTER);
-        int th = cr.bottom - cr.top;
-        tr.top = (tr.bottom - th) / 2;
-        tr.bottom = tr.top + th;
-        Txt(dc, t, &tr, DT_WORDBREAK | DT_CENTER, on ? RGB(235, 248, 255) : (dis ? CL_DIM : CL_TXT), g_fontB);
-    } else if (id == ID_START || id == ID_CANCELBTN || id == ID_REFRESH || id == ID_BROWSE || (id >= ID_BR_UP && id <= ID_BR_CLOSE)) {
-        BOOL isStart = (id == ID_START), isCancel = (id == ID_CANCELBTN || id == ID_BR_CANCEL);
+        COLORREF tc = dis && !on ? CL_DIM : CL_TXT;
+        RECT ir = {S(12), 0, S(36), h};
+        Glyph(dc, NAV_G[op], &ir, tc, g_fontIcon);
+        RECT tr = {g_fontIcon ? S(46) : S(16), 0, w - S(8), h};
+        Txt(dc, NAV_T[op], &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, tc, g_font);
+    } else if (id == ID_LOGBTN || id == ID_OPTS) {
+        /* botão discreto, estilo link */
+        if (hot || sel) RRect(dc, r, S(4), g_pal.navHot, CL_NONE);
+        Txt(dc, t, &r, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX, dis ? CL_DIM : CL_NEON, g_font);
+    } else if (id == ID_REFRESH && g_fontIcon) {
+        RRect(dc, r, S(4), sel ? g_pal.btnDown : (hot ? g_pal.btnHot : g_pal.btn), g_pal.btnEdge);
+        Glyph(dc, 0xE72C, &r, dis ? CL_DIM : CL_TXT, g_fontIcon);
+    } else if (id == ID_START || id == ID_CANCELBTN || id == ID_REFRESH || id == ID_BROWSE || id == ID_NEXT || id == ID_DETECT || (id >= ID_BR_UP && id <= ID_BR_CLOSE)) {
         COLORREF fill, border, tc;
-        if (isStart) {
-            fill = dis ? CL_EDGE : (sel ? RGB(0, 140, 190) : (hot ? RGB(80, 230, 255) : CL_NEON));
-            border = fill;
-            tc = dis ? CL_DIM : CL_BG;
+        if (id == ID_START) {
+            fill = dis ? g_pal.disFill : (sel ? g_pal.accentDown : (hot ? g_pal.accentHot : CL_NEON));
+            border = CL_NONE;
+            tc = dis ? g_pal.disTxt : g_pal.onAccent;
         } else {
-            fill = sel ? CL_PANEL2 : (hot ? RGB(18, 32, 60) : CL_PANEL);
-            border = dis ? CL_EDGE : (isCancel ? CL_DANGER : (hot ? CL_NEON : CL_NEON2));
-            tc = dis ? CL_DIM : (isCancel ? CL_DANGER : CL_TXT);
+            fill = sel ? g_pal.btnDown : (hot ? g_pal.btnHot : g_pal.btn);
+            border = g_pal.btnEdge;
+            tc = dis ? (g_dark ? RGB(120, 120, 120) : RGB(160, 160, 160)) : CL_TXT;
         }
-        Fill(dc, r, fill);
-        Frame(dc, r, border);
-        if (hot && !isStart) {
-            RECT in = r;
-            InflateRect(&in, -1, -1);
-            Frame(dc, in, CL_EDGE);
+        RRect(dc, r, S(4), fill, border);
+        if (foc && id != ID_START) {
+            RECT fr = r;
+            InflateRect(&fr, -S(2), -S(2));
+            RRect(dc, fr, S(3), CL_NONE, g_pal.chkEdge);
         }
-        Txt(dc, t, &r, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX, tc, (isStart || isCancel) ? g_fontB : g_font);
+        Txt(dc, t, &r, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX, tc, id == ID_START ? g_fontB : g_font);
     } else {
+        /* caixa de seleção */
         BOOL radio = (id == ID_RADA || id == ID_RADB), on = Checked(id);
-        int bs = S(16), y0 = (h - bs) / 2;
-        RECT bx = {S(2), y0, S(2) + bs, y0 + bs};
-        COLORREF bc = dis ? CL_EDGE : ((hot || foc) ? CL_NEON : CL_NEON2);
+        int bs = S(20), y0 = (h - bs) / 2;
+        RECT bx = {0, y0, bs, y0 + bs};
         if (radio) {
-            HBRUSH nb = CreateSolidBrush(CL_INPUT);
-            HPEN pn = CreatePen(PS_SOLID, 1, bc);
-            HGDIOBJ ob1 = SelectObject(dc, nb), ob2 = SelectObject(dc, pn);
-            Ellipse(dc, bx.left, bx.top, bx.right, bx.bottom);
-            SelectObject(dc, ob1);
-            SelectObject(dc, ob2);
-            DeleteObject(nb);
-            DeleteObject(pn);
-            if (on) {
-                HBRUSH ib = CreateSolidBrush(dis ? CL_DIM : CL_NEON);
-                HPEN ip = CreatePen(PS_SOLID, 1, dis ? CL_DIM : CL_NEON);
-                ob1 = SelectObject(dc, ib);
-                ob2 = SelectObject(dc, ip);
-                Ellipse(dc, bx.left + S(4), bx.top + S(4), bx.right - S(4), bx.bottom - S(4));
-                SelectObject(dc, ob1);
-                SelectObject(dc, ob2);
-                DeleteObject(ib);
-                DeleteObject(ip);
-            }
+            Disc(dc, bs / 2, y0 + bs / 2, bs / 2, on ? CL_NEON : g_pal.chkEdge);
+            Disc(dc, bs / 2, y0 + bs / 2, on ? S(4) : bs / 2 - 1, on ? g_pal.onAccent : CL_INPUT);
         } else {
-            Fill(dc, bx, CL_INPUT);
-            Frame(dc, bx, bc);
             if (on) {
-                RECT in = bx;
-                InflateRect(&in, -S(3), -S(3));
-                Fill(dc, in, dis ? CL_DIM : CL_NEON);
-            }
+                RRect(dc, bx, S(4), dis ? g_pal.disFill : (hot ? g_pal.accentHot : CL_NEON), CL_NONE);
+                float k = (float)g_dpi / 96.0f;
+                Tick(dc, 5.0f * k, (float)y0 + 10.0f * k, 8.5f * k, (float)y0 + 13.5f * k, 15.0f * k, (float)y0 + 6.5f * k, 1.5f * k, g_pal.onAccent);
+            } else
+                RRect(dc, bx, S(4), hot ? g_pal.btnHot : CL_INPUT, foc ? CL_TXT : g_pal.chkEdge);
         }
-        RECT tr = {bx.right + S(8), 0, w, h};
+        RECT tr = {bs + S(10), 0, w, h};
         Txt(dc, t, &tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX, dis ? CL_DIM : CL_TXT, g_font);
     }
     BitBlt(d->hDC, d->rcItem.left, d->rcItem.top, w, h, dc, 0, 0, SRCCOPY);
@@ -271,59 +466,154 @@ static void DrawCombo(DRAWITEMSTRUCT *d) {
     BOOL dis = (d->itemState & ODS_DISABLED) != 0;
     BOOL edit = (d->itemState & ODS_COMBOBOXEDIT) != 0;
     BOOL hi = (d->itemState & ODS_SELECTED) != 0 && !edit;
-    Fill(d->hDC, rc, hi ? RGB(16, 52, 96) : CL_INPUT);
+    Fill(d->hDC, rc, hi ? g_pal.navSel : CL_INPUT);
     if ((int)d->itemID < 0) return;
     wchar_t t[400];
     t[0] = 0;
     if (SendMessageW(d->hwndItem, CB_GETLBTEXT, d->itemID, (LPARAM)t) == CB_ERR) return;
     if (hi) {
-        RECT b = {rc.left, rc.top, rc.left + S(3), rc.bottom};
-        Fill(d->hDC, b, CL_NEON);
+        RECT b = {rc.left + S(2), rc.top + (rc.bottom - rc.top) / 2 - S(7), rc.left + S(5), rc.top + (rc.bottom - rc.top) / 2 + S(7)};
+        RRect(d->hDC, b, S(1), CL_NEON, CL_NONE);
     }
     RECT tr = rc;
-    tr.left += S(8);
+    tr.left += S(10);
     tr.right -= S(4);
-    Txt(d->hDC, t, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX, dis ? CL_DIM : (hi ? RGB(235, 248, 255) : CL_TXT), g_font);
+    Txt(d->hDC, t, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX, dis ? CL_DIM : CL_TXT, g_font);
 }
 
-static void DrawHeader(DRAWITEMSTRUCT *d) {
+/* fundo do menu de navegação: nome do app e separador entre os grupos */
+static void DrawSidebar(DRAWITEMSTRUCT *d) {
     int w = d->rcItem.right - d->rcItem.left, h = d->rcItem.bottom - d->rcItem.top;
     HDC dc = CreateCompatibleDC(d->hDC);
     HBITMAP bm = CreateCompatibleBitmap(d->hDC, w, h);
     HGDIOBJ ob = SelectObject(dc, bm);
-    for (int x = 0; x < w; x += 4) {
-        int t = x * 255 / (w > 0 ? w : 1);
-        RECT s = {x, 0, x + 4, h};
-        Fill(dc, s, RGB(8 + t * 4 / 255, 12 + t * 34 / 255, 24 + t * 66 / 255));
+    RECT r = {0, 0, w, h};
+    Fill(dc, r, CL_BG);
+    RECT gi = {S(16), S(10), S(36), S(34)};
+    Glyph(dc, 0xE7F1, &gi, CL_NEON, g_fontIcon);
+    RECT tt = {g_fontIcon ? S(46) : S(16), S(10), w - S(8), S(34)};
+    Txt(dc, L"SD Clone Tools", &tt, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX, CL_TXT, g_fontSmall);
+    RECT sp = {S(20), S(NAV_SEP_Y), w - S(20), S(NAV_SEP_Y) + 1};
+    Fill(dc, sp, g_pal.btnEdge);
+    BitBlt(d->hDC, d->rcItem.left, d->rcItem.top, w, h, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, ob);
+    DeleteObject(bm);
+    DeleteDC(dc);
+}
+
+/* faixa de aviso (InfoBar) quando a tarefa apaga dados */
+static void DrawWarn(DRAWITEMSTRUCT *d) {
+    int w = d->rcItem.right - d->rcItem.left, h = d->rcItem.bottom - d->rcItem.top;
+    HDC dc = CreateCompatibleDC(d->hDC);
+    HBITMAP bm = CreateCompatibleBitmap(d->hDC, w, h);
+    HGDIOBJ ob = SelectObject(dc, bm);
+    RECT r = {0, 0, w, h};
+    wchar_t t[300];
+    GetWindowTextW(d->hwndItem, t, 300);
+    Fill(dc, r, CL_PANEL);
+    RRect(dc, r, S(4), g_pal.warnBg, g_pal.warnEdge);
+    RECT gi = {S(12), 0, S(32), h};
+    if (g_fontIcon) Glyph(dc, 0xEA39, &gi, CL_DANGER, g_fontIcon);
+    else Disc(dc, S(20), h / 2, S(5), CL_DANGER);
+    RECT tr = {S(42), 0, w - S(12), h};
+    Txt(dc, t, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, CL_TXT, g_font);
+    BitBlt(d->hDC, d->rcItem.left, d->rcItem.top, w, h, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, ob);
+    DeleteObject(bm);
+    DeleteDC(dc);
+}
+
+static COLORREF MapColor(int c) {
+    switch (c) {
+    case MC_DATA: return CL_NEON;
+    case MC_EMPTY: return g_pal.empty;
+    case MC_SLOW: return g_pal.caution;
+    case MC_BAD: return CL_DANGER;
+    default: return g_pal.btnEdge;
     }
-    RECT l2 = {0, h - 4, w, h - 2}, l1 = {0, h - 2, w, h};
-    Fill(dc, l2, RGB(0, 70, 110));
-    Fill(dc, l1, CL_NEON);
-    SelectObject(dc, g_fontTitle);
-    SetBkMode(dc, TRANSPARENT);
-    const wchar_t *title = L"SDCLONETOOLS";
-    SIZE sz;
-    GetTextExtentPoint32W(dc, L"M", 1, &sz);
-    int ty = (h - 4 - sz.cy) / 2, x = S(14), sp = S(4);
-    for (int pass = 0; pass < 2; pass++) {
-        int cx = x;
-        for (const wchar_t *c = title; *c; c++) {
-            GetTextExtentPoint32W(dc, c, 1, &sz);
-            if (pass == 0) {
-                SetTextColor(dc, RGB(0, 80, 125));
-                TextOutW(dc, cx - 1, ty, c, 1);
-                TextOutW(dc, cx + 1, ty, c, 1);
-                TextOutW(dc, cx, ty - 1, c, 1);
-                TextOutW(dc, cx, ty + 1, c, 1);
-            } else {
-                SetTextColor(dc, CL_NEON);
-                TextOutW(dc, cx, ty, c, 1);
-            }
-            cx += sz.cx + sp;
+}
+
+/* painel com o veredito do diagnóstico */
+static void DrawResult(DRAWITEMSTRUCT *d) {
+    int w = d->rcItem.right - d->rcItem.left, h = d->rcItem.bottom - d->rcItem.top;
+    HDC dc = CreateCompatibleDC(d->hDC);
+    HBITMAP bm = CreateCompatibleBitmap(d->hDC, w, h);
+    HGDIOBJ ob = SelectObject(dc, bm);
+    RECT r = {0, 0, w, h};
+    Fill(dc, r, CL_BG);
+    RRect(dc, r, S(6), CL_PANEL, CL_EDGE);
+    const Verdict *v = &g_vd;
+    if (!v->valid || v->op != g_op) {
+        RECT tr = {S(24), 0, w - S(24), h};
+        Txt(dc, g_op == OP_CSD ? L"Escolha como acessar o cartão e clique em Ler proteção. O resultado aparece aqui."
+                               : L"Escolha o cartão e clique em Analisar cartão. O resultado aparece aqui.", &tr,
+            DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, CL_DIM, g_font);
+    } else {
+        COLORREF lc = v->level == 0 ? g_pal.ok : (v->level == 1 ? g_pal.caution : CL_DANGER);
+        COLORREF lb = v->level == 0 ? g_pal.okBg : (v->level == 1 ? g_pal.cautionBg : g_pal.warnBg);
+        RECT hb = {S(16), S(16), w - S(16), S(60)};
+        RRect(dc, hb, S(4), lb, CL_NONE);
+        RECT gi = {hb.left + S(12), hb.top, hb.left + S(36), hb.bottom};
+        wchar_t g = v->level == 0 ? 0xE930 : (v->level == 1 ? 0xE7BA : 0xEA39);
+        if (g_fontIconM) Glyph(dc, g, &gi, lc, g_fontIconM);
+        else Disc(dc, (gi.left + gi.right) / 2, (hb.top + hb.bottom) / 2, S(6), lc);
+        RECT ti = {hb.left + S(46), hb.top, hb.right - S(12), hb.bottom};
+        Txt(dc, v->title, &ti, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, CL_TXT, g_fontH);
+
+        static const wchar_t *lab[4] = {L"Causa provável", L"O cartão tem conserto?", L"Dá para salvar os dados?", L"O que fazer agora"};
+        const wchar_t *val[4] = {v->cause, v->card, v->data, v->todo};
+        int mapTop = v->map ? h - S(70) : h - S(10);
+        int y = hb.bottom + S(14), lx = S(20), lw = S(190), vx = lx + lw + S(12), vw = w - vx - S(20);
+        for (int i = 0; i < 4; i++) {
+            RECT vr = {vx, y, vx + vw, y};
+            HGDIOBJ o = SelectObject(dc, g_fontVal);
+            DrawTextW(dc, val[i], -1, &vr, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+            SelectObject(dc, o);
+            int rh = vr.bottom - vr.top;
+            if (rh < S(18)) rh = S(18);
+            if (y + rh > mapTop - S(6)) rh = mapTop - S(6) - y;
+            if (rh <= 0) break;
+            RECT lr = {lx, y, lx + lw, y + rh};
+            vr.left = vx; vr.right = vx + vw; vr.top = y; vr.bottom = y + rh;
+            Txt(dc, lab[i], &lr, DT_SINGLELINE | DT_NOPREFIX, CL_DIM, g_fontValB);
+            Txt(dc, val[i], &vr, DT_WORDBREAK | DT_NOPREFIX, CL_TXT, g_fontVal);
+            y += rh + S(10);
+        }
+
+        /* mapa de leitura */
+        if (v->map) {
+        RECT sl = {S(20), mapTop, w - S(20), mapTop + 1};
+        Fill(dc, sl, CL_EDGE);
+        RECT ml = {S(20), mapTop + S(10), w - S(20), mapTop + S(26)};
+        Txt(dc, L"Mapa de leitura: 128 pontos do início ao fim do cartão", &ml, DT_SINGLELINE | DT_NOPREFIX, CL_DIM, g_fontSmall);
+        int bx = S(20), bw = w - S(40), by = mapTop + S(30), bh = S(10);
+        for (int i = 0; i < MAP_N; i++) {
+            RECT c = {bx + bw * i / MAP_N, by, bx + bw * (i + 1) / MAP_N, by + bh};
+            if (c.right - c.left > 3) c.right -= 1;
+            Fill(dc, c, MapColor(v->cell[i]));
+        }
+        static const wchar_t *ln[5] = {L"Com dados", L"Vazio", L"Lento", L"Ilegível", L"Não lido"};
+        int cnt[5] = {v->nData, v->nEmpty, v->nSlow, v->nBad, v->nSkip};
+        int lx2 = S(20), ly = by + bh + S(8);
+        HGDIOBJ o = SelectObject(dc, g_fontSmall);
+        for (int i = 0; i < 5; i++) {
+            if (i == MC_SKIP && cnt[i] == 0) continue;
+            wchar_t s[48];
+            _snwprintf(s, 47, L"%ls %d", ln[i], cnt[i]);
+            s[47] = 0;
+            RECT sq = {lx2, ly + S(3), lx2 + S(10), ly + S(13)};
+            Fill(dc, sq, MapColor(i));
+            SIZE ts;
+            GetTextExtentPoint32W(dc, s, (int)wcslen(s), &ts);
+            RECT tr = {lx2 + S(15), ly, lx2 + S(15) + ts.cx + 2, ly + S(16)};
+            SetTextColor(dc, CL_DIM);
+            SetBkMode(dc, TRANSPARENT);
+            DrawTextW(dc, s, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+            lx2 = tr.right + S(22);
+        }
+        SelectObject(dc, o);
         }
     }
-    RECT sr = {0, 0, w - S(14), h - 4};
-    Txt(dc, L"CARTÕES SD · GAMESTICK & PORTÁTEIS", &sr, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX, RGB(80, 170, 210), g_fontSmall);
     BitBlt(d->hDC, d->rcItem.left, d->rcItem.top, w, h, dc, 0, 0, SRCCOPY);
     SelectObject(dc, ob);
     DeleteObject(bm);
@@ -654,9 +944,15 @@ static BOOL WriteAtRaw(HANDLE h, uint64_t off, const void *buf, DWORD len) {
 /* len deve ser múltiplo de sec. Setores ilegíveis viram zeros e são contados em *bad. */
 static void ReadChunkRobust(HANDLE h, uint64_t off, uint8_t *buf, DWORD len, DWORD sec, uint64_t *bad) {
     if (ReadAtRaw(h, off, buf, len)) return;
+    /* estilo ddrescue: setor a setor; depois de 32 falhas seguidas, só tenta 1 a cada 64 setores
+       até a leitura voltar, para não travar horas numa área ruim */
+    int run = 0;
     for (DWORD o = 0; o < len; o += sec) {
         BOOL ok = FALSE;
-        for (int t = 0; t < 2 && !ok; t++) ok = ReadAtRaw(h, off + o, buf + o, sec);
+        BOOL tryIt = run < 32 || ((o / sec) % 64) == 0;
+        for (int t = 0; t < (run < 32 ? 2 : 1) && !ok && tryIt; t++) ok = ReadAtRaw(h, off + o, buf + o, sec);
+        if (ok) run = 0;
+        else run++;
         if (!ok) {
             memset(buf + o, 0, sec);
             (*bad)++;
@@ -1214,13 +1510,19 @@ static int RecProg(void *c, uint64_t pos) {
 }
 
 static BOOL DoRecover(Job *j) {
-    BOOL ok = FALSE;
-    HANDLE hd = OpenDisk(j->src, FALSE);
+    BOOL ok = FALSE, fromImg = j->img[0] != 0;
+    HANDLE hd = fromImg ? CreateFileW(j->img, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL) : OpenDisk(j->src, FALSE);
     RecCtx r;
     Dev d;
     memset(&r, 0, sizeof r);
-    if (hd == INVALID_HANDLE_VALUE) { LogErr(L"abrir o cartão"); goto done; }
-    if (!DiskLenMatches(hd, j->srcSize)) { Log(L"ERRO: o tamanho do disco mudou. Atualize a lista."); goto done; }
+    if (hd == INVALID_HANDLE_VALUE) { LogErr(fromImg ? L"abrir o arquivo de imagem" : L"abrir o cartão"); goto done; }
+    if (fromImg) {
+        LARGE_INTEGER fsz;
+        if (!GetFileSizeEx(hd, &fsz) || fsz.QuadPart < 512) { Log(L"ERRO: arquivo de imagem vazio ou ilegível."); goto done; }
+        j->srcSize = (uint64_t)fsz.QuadPart & ~(uint64_t)511;
+        j->srcSec = 512;
+        Log(L"Lendo do arquivo de imagem: %ls", j->img);
+    } else if (!DiskLenMatches(hd, j->srcSize)) { Log(L"ERRO: o tamanho do disco mudou. Atualize a lista."); goto done; }
     d.h = hd; d.raw = TRUE; d.sec = j->srcSec;
     r.d = &d;
     r.next = 1;
@@ -1231,7 +1533,7 @@ static BOOL DoRecover(Job *j) {
     }
     r.buf = (uint8_t *)ALLOC_ALIGNED(CHUNK);
     if (!r.buf) { Log(L"ERRO: memória insuficiente."); goto done; }
-    Log(L"Procurando JPG, PNG, PDF e vídeos MP4/MOV no Disco %d. Os arquivos vão para: %ls", j->src, r.folder);
+    Log(L"Procurando JPG, PNG, PDF e vídeos MP4/MOV%ls. Os arquivos vão para: %ls", fromImg ? L" na imagem" : L" no cartão", r.folder);
     Log(L"Os nomes originais não existem mais; os arquivos recebem nomes numerados. Esta operação só LÊ o cartão.");
     SetPhase(L"Procurando arquivos no cartão — 0 encontrados", j->srcSize);
     g_bad = 0;
@@ -1300,59 +1602,6 @@ static BOOL RunHidden(wchar_t *cmd, DWORD *exitCode) {
     return TRUE;
 }
 
-/* testa se o cartão aceita gravação de verdade (chave de proteção, cartão falso/defeituoso). Restaura o que escreveu. */
-static BOOL ProbeWrite(int disk) {
-    DiskInfo *di = FindDisk(disk);
-    VolSet vs;
-    BOOL good = TRUE;
-    vs.n = 0;
-    if (!di) return TRUE;
-    uint32_t sec = di->sec, len = sec > 4096 ? sec : 4096;
-    uint64_t sz = di->size;
-    Log(L"Testando se o cartão aceita gravação (grava e lê de volta em 3 pontos; o conteúdo original é restaurado)...");
-    LockDiskVolumes(disk, &vs);
-    HANDLE h = OpenDisk(disk, TRUE);
-    if (h == INVALID_HANDLE_VALUE) {
-        LogErr(L"abrir o cartão para escrita");
-        UnlockVolumes(&vs);
-        return FALSE;
-    }
-    DWORD br;
-    if (!DeviceIoControl(h, IOCTL_DISK_IS_WRITABLE, NULL, 0, NULL, 0, &br, NULL) && GetLastError() == ERROR_WRITE_PROTECT) {
-        Log(L"RESULTADO: o cartão está PROTEGIDO CONTRA GRAVAÇÃO (chave de trava do cartão SD/adaptador microSD, ou do leitor).");
-        SetSummary(MB_ICONERROR, L"O cartão está PROTEGIDO CONTRA GRAVAÇÃO.\n\nCorrija: desloque a chave lateral do cartão SD (ou do adaptador do microSD) para a posição destravada e tente de novo. Se não houver chave, tente outro leitor.");
-        CloseHandle(h);
-        UnlockVolumes(&vs);
-        return FALSE;
-    }
-    uint8_t *o = (uint8_t *)ALLOC_ALIGNED(len), *w = (uint8_t *)ALLOC_ALIGNED(len), *r = (uint8_t *)ALLOC_ALIGNED(len);
-    if (o && w && r) {
-        uint64_t offs[3] = {1024 * 1024, (sz / 2 / sec) * sec, ((sz - 1024 * 1024) / sec) * sec};
-        for (int i = 0; i < 3; i++) {
-            if (offs[i] + len > sz) continue;
-            FillPattern(w, 0, len, 0x5DC1A55ull + (uint64_t)i);
-            if (!ReadAtRaw(h, offs[i], o, len)) { Log(L"  posição %I64u: leitura falhou", (unsigned long long)offs[i]); good = FALSE; continue; }
-            BOOL wr = WriteAtRaw(h, offs[i], w, len);
-            FlushFileBuffers(h);
-            BOOL rd = wr && ReadAtRaw(h, offs[i], r, len);
-            BOOL same = rd && memcmp(w, r, len) == 0;
-            WriteAtRaw(h, offs[i], o, len);
-            Log(L"  posição %I64u: gravação %ls, leitura de volta %ls", (unsigned long long)offs[i], wr ? L"ok" : L"FALHOU", same ? L"idêntica" : L"DIFERENTE/FALHOU");
-            if (!same) good = FALSE;
-        }
-    }
-    if (o) FREE_ALIGNED(o);
-    if (w) FREE_ALIGNED(w);
-    if (r) FREE_ALIGNED(r);
-    CloseHandle(h);
-    UnlockVolumes(&vs);
-    if (!good) {
-        Log(L"RESULTADO: o cartão NÃO grava corretamente. Verifique a chave de trava do cartão/adaptador, troque de leitor; se continuar, o cartão está com defeito ou é falso (rode Autenticidade) e deve ser trocado.");
-        SetSummary(MB_ICONERROR, L"O cartão não aceitou gravação corretamente, por isso não foi possível formatar.\n\n1) Confira a chave de trava do cartão SD ou do adaptador microSD (posição destravada).\n2) Teste outro leitor/porta USB.\n3) Se continuar, o cartão está com defeito ou é falso: rode 'Autenticidade' e troque o cartão.");
-    } else Log(L"O cartão aceitou a gravação nos 3 pontos testados.");
-    return good;
-}
-
 static BOOL FormatDisk(int disk, const char *fs, const char *label) {
     wchar_t tmpdir[MAX_PATH], tmp[MAX_PATH], cmd[MAX_PATH + 64];
     char script[700];
@@ -1360,7 +1609,7 @@ static BOOL FormatDisk(int disk, const char *fs, const char *label) {
     DWORD w, code = 1;
     SetIndet(L"Formatando o cartão (limpar, particionar e formatar)...");
     _snprintf(script, sizeof script - 1,
-              "select disk %d\r\nattributes disk clear readonly noerr\r\nonline disk noerr\r\nclean\r\nconvert mbr noerr\r\ncreate partition primary\r\nformat fs=%s quick label=%s\r\nassign\r\nexit\r\n",
+              "select disk %d\r\nattributes disk clear readonly noerr\r\nclean\r\ncreate partition primary\r\nformat fs=%s quick label=%s\r\nassign\r\nexit\r\n",
               disk, fs, label);
     script[sizeof script - 1] = 0;
     GetTempPathW(MAX_PATH, tmpdir);
@@ -1374,10 +1623,7 @@ static BOOL FormatDisk(int disk, const char *fs, const char *label) {
     cmd[MAX_PATH + 63] = 0;
     if (!RunHidden(cmd, &code)) { LogErr(L"executar o diskpart"); DeleteFileW(tmp); return FALSE; }
     DeleteFileW(tmp);
-    if (code != 0) {
-        Log(L"ERRO: o diskpart terminou com código %lu. Veja as mensagens acima.", (unsigned long)code);
-        ProbeWrite(disk);
-    }
+    if (code != 0) Log(L"ERRO: o diskpart terminou com código %lu. Veja as mensagens acima.", (unsigned long)code);
     return code == 0;
 }
 
@@ -1396,6 +1642,706 @@ done:
 }
 
 #include "repair.h"
+
+/* ------------------------------------------------------------ diagnóstico com veredito
+ * 1. lê o início do cartão (MBR/GPT);
+ * 2. lê 128 pontos espalhados do início ao fim e classifica cada um (com dados, vazio, lento, ilegível);
+ * 3. (opcional) testa a gravação em 2 pontos: grava o conteúdo invertido, lê de volta e restaura o original.
+ *    Isso separa: gravação recusada (controladora travada em somente leitura), gravação ignorada
+ *    (o cartão finge que gravou) e gravação corrompida (memória com defeito);
+ * 4. junta tudo num veredito em linguagem simples. */
+static int IsFill(const uint8_t *b, DWORD n, uint8_t v) {
+    for (DWORD i = 0; i < n; i++)
+        if (b[i] != v) return 0;
+    return 1;
+}
+
+static void VSet(wchar_t *dst, size_t n, const wchar_t *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnwprintf(dst, n - 1, fmt, ap);
+    va_end(ap);
+    dst[n - 1] = 0;
+}
+#define VS(field, ...) VSet(v->field, sizeof v->field / sizeof(wchar_t), __VA_ARGS__)
+
+static BOOL DoHealth(Job *j) {
+    Verdict *v = &g_vd;
+    memset(v, 0, sizeof *v);
+    v->op = OP_DIAG;
+    v->map = TRUE;
+    uint32_t sec = j->srcSec ? j->srcSec : 512;
+    uint64_t size = j->srcSize;
+    DWORD blk = 64 * 1024;
+    if (sec > 4096 || blk % sec) blk = sec * 16;
+    DWORD tl = sec > 4096 ? sec : 4096;
+    uint8_t *buf = (uint8_t *)ALLOC_ALIGNED(blk), *pat = (uint8_t *)ALLOC_ALIGNED(blk), *rb = (uint8_t *)ALLOC_ALIGNED(blk);
+    HANDLE hd = INVALID_HANDLE_VALUE, hw = INVALID_HANDLE_VALUE;
+    VolSet vs;
+    memset(&vs, 0, sizeof vs);
+    BOOL locked = FALSE, opened = FALSE, mbr = FALSE, gpt = FALSE, r0 = FALSE;
+    int wr = -1; /* -1 não testado, 0 ok, 1 recusada, 2 ignorada, 3 corrompida */
+    DWORD wrErr = 0;
+    wchar_t sz[32];
+    FmtSize(size, sz, 32);
+    if (!buf || !pat || !rb) { Log(L"ERRO: memória insuficiente."); goto out; }
+    Log(L"Diagnóstico do Disco %d: %ls, setor de %u bytes.", j->src, sz, sec);
+
+    hd = OpenDisk(j->src, FALSE);
+    if (hd != INVALID_HANDLE_VALUE && DiskLenMatches(hd, size)) opened = TRUE;
+    else if (hd == INVALID_HANDLE_VALUE) LogErr(L"abrir o cartão");
+    else Log(L"ERRO: o tamanho do disco mudou. Clique em Atualizar e tente de novo.");
+
+    if (opened) {
+        /* 1. tabela de partições */
+        SetIndet(L"Lendo a tabela de partições...");
+        if (ReadAtRaw(hd, 0, buf, sec * 2 <= blk ? sec * 2 : blk)) {
+            r0 = TRUE;
+            if (buf[510] == 0x55 && buf[511] == 0xAA)
+                for (int i = 0; i < 4; i++)
+                    if (buf[446 + 16 * i + 4]) mbr = TRUE;
+            if (memcmp(buf + sec, "EFI PART", 8) == 0) gpt = TRUE;
+        }
+        Log(!r0 ? L"Não foi possível ler o início do cartão." : (gpt ? L"Tabela de partições: GPT." : (mbr ? L"Tabela de partições: MBR." : L"Tabela de partições: nenhuma (cartão RAW).")));
+
+        /* 2. leitura por amostragem */
+        SetPhase(L"Lendo pontos de todo o cartão", (uint64_t)MAP_N * blk);
+        int fails = 0;
+        for (int i = 0; i < MAP_N; i++) {
+            if (g_cancel || fails >= 12) { v->cell[i] = MC_SKIP; continue; }
+            uint64_t off = size > blk ? ((size - blk) / (MAP_N - 1)) * (uint64_t)i : 0;
+            off -= off % sec;
+            double t0 = NowSec();
+            BOOL ok = ReadAtRaw(hd, off, buf, blk);
+            double dt = NowSec() - t0;
+            if (!ok) { v->cell[i] = MC_BAD; fails++; }
+            else if (dt > 1.0) v->cell[i] = MC_SLOW;
+            else if (IsFill(buf, blk, 0) || IsFill(buf, blk, 0xFF)) v->cell[i] = MC_EMPTY;
+            else v->cell[i] = MC_DATA;
+            g_done += blk;
+        }
+        if (g_cancel) { Log(L"Diagnóstico cancelado."); goto out; }
+        if (fails >= 12) Log(L"Muitos pontos ilegíveis seguidos; o restante do mapa não foi lido para não travar.");
+    }
+    for (int i = 0; i < MAP_N; i++) {
+        if (!opened) v->cell[i] = MC_SKIP;
+        switch (v->cell[i]) {
+        case MC_DATA: v->nData++; break;
+        case MC_EMPTY: v->nEmpty++; break;
+        case MC_SLOW: v->nSlow++; break;
+        case MC_BAD: v->nBad++; break;
+        default: v->nSkip++; break;
+        }
+    }
+    int tested = MAP_N - v->nSkip, readable = v->nData + v->nEmpty + v->nSlow;
+    Log(L"Leitura: %d pontos com dados, %d vazios, %d lentos, %d ilegíveis, %d não lidos.", v->nData, v->nEmpty, v->nSlow, v->nBad, v->nSkip);
+
+    /* 3. teste de gravação (devolve o conteúdo original) */
+    if (opened && j->verify && readable > 0 && tl * 1 <= blk && !g_cancel) {
+        SetIndet(L"Testando a gravação...");
+        if (!LockDiskVolumes(j->src, &vs)) {
+            Log(L"Aviso: não foi possível travar as partições do cartão; o teste de gravação foi pulado. Feche programas que usam o cartão.");
+        } else {
+            locked = TRUE;
+            hw = OpenDisk(j->src, TRUE);
+            if (hw == INVALID_HANDLE_VALUE) {
+                wr = 1;
+                wrErr = GetLastError();
+            } else {
+                uint64_t pos[2] = {size / 2, size / 8 * 7};
+                for (int k = 0; k < 2; k++) {
+                    uint64_t off = pos[k] - pos[k] % (1024 * 1024);
+                    if (!ReadAtRaw(hw, off, buf, tl)) { Log(L"Ponto de teste %d ilegível; pulado.", k + 1); continue; }
+                    for (DWORD x = 0; x < tl; x++) pat[x] = (uint8_t)~buf[x];
+                    if (!WriteAtRaw(hw, off, pat, tl)) { wr = 1; wrErr = GetLastError(); break; }
+                    FlushFileBuffers(hw);
+                    int res;
+                    if (!ReadAtRaw(hw, off, rb, tl)) res = 3;
+                    else if (memcmp(rb, pat, tl) == 0) res = 0;
+                    else if (memcmp(rb, buf, tl) == 0) res = 2;
+                    else res = 3;
+                    if (!WriteAtRaw(hw, off, buf, tl)) {
+                        if (res == 0) Log(L"ATENÇÃO: não foi possível devolver o conteúdo original de 4 KB na posição %I64u.", (unsigned long long)off);
+                    } else {
+                        FlushFileBuffers(hw);
+                        if (res == 0 && (!ReadAtRaw(hw, off, rb, tl) || memcmp(rb, buf, tl) != 0))
+                            Log(L"ATENÇÃO: o conteúdo original na posição %I64u não voltou igual.", (unsigned long long)off);
+                    }
+                    if (wr < res) wr = res;
+                    if (res != 0) break;
+                }
+                if (wr < 0) wr = -1; /* nenhum ponto pôde ser testado */
+            }
+        }
+        if (wr == 0) Log(L"Gravação: funciona (testada em 2 pontos; conteúdo original devolvido).");
+        else if (wr == 1) { SetLastError(wrErr); LogErr(L"gravação recusada pelo cartão"); }
+        else if (wr == 2) Log(L"Gravação: o cartão diz que gravou, mas o conteúdo não mudou.");
+        else if (wr == 3) Log(L"Gravação: o conteúdo lido de volta veio diferente do gravado.");
+    } else if (opened && !j->verify)
+        Log(L"Teste de gravação desmarcado.");
+
+    /* registro CID (só leitores SD internos expõem) */
+    {
+        SdId ids[4];
+        int nid = ReadSdBusCards(ids, 4);
+        for (int k = 0; k < nid; k++) {
+            wchar_t oem[16] = L"";
+            OidToText(ids[k].oid, oem);
+            Log(L"Registro CID (leitor SD interno): fabricante 0x%02X, OEM %ls, produto %ls, revisão %ls.", ids[k].mid, oem, ids[k].pnm, ids[k].rev);
+        }
+        if (nid == 0) Log(L"Registro CID não disponível: em leitores USB o Windows não mostra o fabricante gravado no cartão.");
+    }
+
+    /* capacidade fora do padrão comercial */
+    wchar_t capNote[220] = L"";
+    {
+        static const int gb[] = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048};
+        for (int k = 0; k < 12; k++) {
+            double s = (double)gb[k] * 1e9;
+            if ((double)size <= s * 1.02) {
+                if ((double)size / s < 0.915 && gb[k] >= 4) {
+                    _snwprintf(capNote, 219, L" A capacidade informada (%ls) é menor que a de um cartão comum de %d GB.", sz, gb[k]);
+                    capNote[219] = 0;
+                    Log(L"Observação: a capacidade informada (%ls) não corresponde a um tamanho comercial comum (o mais próximo é %d GB). Pode indicar controladora com defeito ou cartão falsificado.", sz, gb[k]);
+                }
+                break;
+            }
+        }
+    }
+
+    /* 4. veredito */
+    int pct = readable > 0 ? (v->nData * 100 + readable / 2) / readable : 0;
+    if (!opened || (tested > 0 && readable == 0)) {
+        v->level = 2; v->next = NX_NONE;
+        VS(title, L"O cartão não responde à leitura");
+        VS(cause, L"A controladora não entrega dados: pode estar queimada, com o firmware travado ou com contato danificado. Também pode ser o leitor.");
+        VS(card, L"Não tem conserto por software.");
+        VS(data, L"Só em laboratório de recuperação (extração do chip), com custo alto e sem garantia.");
+        VS(todo, L"Teste em outro leitor e outra porta USB. Se os dados forem importantes, procure um laboratório.");
+    } else if (wr >= 1) {
+        v->level = 2;
+        if (wr == 1 && wrErr == ERROR_WRITE_PROTECT) {
+            v->level = 1;
+            VS(title, L"Gravação bloqueada por proteção");
+            VS(cause, L"O cartão, o adaptador ou o leitor está protegido contra gravação: a chave lateral do adaptador ou a proteção interna do cartão.");
+            VS(card, L"Talvez. Mova a chave do adaptador e teste outro leitor. Se a proteção for interna do cartão, não há conserto.");
+        } else if (wr == 1) {
+            VS(title, L"Cartão travado em somente leitura");
+            VS(cause, L"A controladora recusa gravações (erro %lu), mas ainda lê. É o modo de proteção que ela ativa quando a memória se desgasta ou falha.", (unsigned long)wrErr);
+            VS(card, L"Não. O bloqueio fica no firmware do cartão: formatar, diskpart ou reconstruir partições vão falhar.");
+        } else if (wr == 2) {
+            VS(title, L"O cartão não guarda o que é gravado");
+            VS(cause, L"O cartão aceita a gravação, mas o conteúdo não muda: falha da controladora ou da memória, comum em cartão desgastado ou falsificado.");
+            VS(card, L"Não. Descarte o cartão.");
+        } else {
+            VS(title, L"A gravação corrompe os dados");
+            VS(cause, L"O conteúdo lido de volta veio diferente do gravado: a memória flash ou a controladora está com defeito.");
+            VS(card, L"Não. Descarte o cartão.");
+        }
+        if (v->nData > 0) {
+            v->next = NX_BACKUP;
+            VS(data, L"Sim. A leitura funciona e %d%% dos pontos lidos têm dados. Copie tudo agora, antes que piore.", pct);
+            VS(todo, L"Faça um backup (imagem) do cartão e recupere os arquivos a partir da imagem. Depois, descarte o cartão.");
+        } else {
+            v->next = NX_NONE;
+            VS(data, L"Provavelmente não: todos os pontos lidos estão vazios. A controladora perdeu o mapa dos dados ou o cartão foi apagado.");
+            VS(todo, L"Programas não recuperam dados que o cartão não entrega. Só um laboratório (extração do chip) pode tentar, sem garantia.");
+        }
+        if (wr == 1 && wrErr == ERROR_WRITE_PROTECT && v->nData > 0)
+            VS(todo, L"Faça o backup antes de qualquer tentativa. Depois confira a chave do adaptador e teste outro leitor.");
+    } else if (v->nBad > 0) {
+        v->level = 2; v->next = NX_BACKUP;
+        VS(title, L"Cartão com áreas ilegíveis");
+        VS(cause, L"%d de %d pontos não puderam ser lidos: a memória flash está desgastada ou com defeito.", v->nBad, tested);
+        VS(card, L"Não é confiável. Mesmo que volte a funcionar depois de formatar, pode falhar de novo.");
+        VS(data, L"Em grande parte, sim. O backup pula as áreas ruins e salva o resto.");
+        VS(todo, L"Faça um backup (imagem) agora e recupere os arquivos a partir dele. Evite gravar no cartão.");
+    } else if (v->nSlow * 10 >= tested && v->nSlow > 0) {
+        v->level = 1; v->next = NX_BACKUP;
+        VS(title, L"Leitura muito lenta");
+        VS(cause, L"%d pontos demoraram mais de 1 segundo para ler: sinal de desgaste da memória ou de problema no leitor.", v->nSlow);
+        VS(card, L"Use com cautela e teste outro leitor.");
+        VS(data, L"Sim. Faça um backup enquanto o cartão ainda lê.");
+        VS(todo, L"Faça o backup e depois use Verificar setores para examinar o cartão inteiro.");
+    } else if (r0 && !mbr && !gpt) {
+        v->level = 1;
+        if (v->nData == 0) {
+            v->next = NX_RESTORE;
+            VS(title, L"Cartão vazio, sem partição");
+            VS(cause, L"O cartão está zerado: não há tabela de partições nem dados nos pontos lidos.");
+            VS(card, wr == 0 ? L"Sim. A gravação funciona; restaure o cartão para voltar a usar." : L"Provavelmente. Restaure o cartão; se falhar, ele está travado em somente leitura.");
+            VS(data, L"Não há dados para recuperar.");
+            VS(todo, L"Use Restaurar o cartão para criar uma partição e formatar.");
+        } else {
+            v->next = NX_REBUILD;
+            VS(title, L"Tabela de partições perdida");
+            VS(cause, L"Há dados, mas a tabela de partições sumiu (cartão RAW). Acontece ao remover o cartão durante a gravação ou com queda de energia.");
+            VS(card, wr == 0 ? L"Sim. Depois de salvar os dados, o cartão pode ser restaurado." : L"Provavelmente. O teste de gravação não foi feito.");
+            VS(data, L"Sim. Reconstruir partições refaz a tabela sem apagar os dados.");
+            VS(todo, L"Use Reconstruir partições. Se não der certo, use Recuperar arquivos apagados.");
+        }
+    } else {
+        v->level = 0; v->next = NX_AUTH;
+        VS(title, L"Nenhum defeito encontrado");
+        VS(cause, L"A leitura funciona em todo o cartão%ls e a tabela de partições existe.", wr == 0 ? L", a gravação também" : L"");
+        VS(card, L"O cartão está funcionando.");
+        VS(data, L"Não há sinal de perda de dados.");
+        VS(todo, L"Para saber se a capacidade é real, use Autenticidade com o teste completo.%ls%ls", capNote, wr < 0 ? L" O teste de gravação não foi feito." : L"");
+    }
+    Log(L"Resultado: %ls.", v->title);
+    v->valid = TRUE;
+out:
+    if (hw != INVALID_HANDLE_VALUE) CloseHandle(hw);
+    if (locked) UnlockVolumes(&vs);
+    if (hd != INVALID_HANDLE_VALUE) CloseHandle(hd);
+    if (buf) FREE_ALIGNED(buf);
+    if (pat) FREE_ALIGNED(pat);
+    if (rb) FREE_ALIGNED(rb);
+    return v->valid;
+}
+
+/* ------------------------------------------------------------ proteção do cartão (registros CID/CSD)
+ * Dois caminhos separados:
+ *  - Leitor interno do computador: comandos SD enviados pelo driver do Windows (IOCTL_SFFDISK_DEVICE_COMMAND).
+ *    Só funciona em leitores SD ligados ao barramento SD do Windows; leitores USB não repassam esses comandos.
+ *    Neste modo o app só LÊ os registros.
+ *  - Arduino/ESP32: o programa arduino/sdtools_arduino fala direto com o cartão por SPI. Lê os registros,
+ *    vê se há senha, testa a gravação e pode desligar o bit de proteção temporária. */
+#ifndef IOCTL_SFFDISK_DEVICE_COMMAND
+#define IOCTL_SFFDISK_DEVICE_COMMAND CTL_CODE(FILE_DEVICE_DISK, 0x7a0, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+#endif
+typedef struct { USHORT HeaderSize, Flags; int Command; USHORT ProtocolArgumentSize; ULONG DeviceDataBufferSize; ULONG_PTR Information; } SffCmdHdr;
+typedef struct { UCHAR Cmd; int CmdClass, TransferDirection, TransferType, ResponseType; } SdCmdDesc;
+
+/* portas seriais (Arduino/ESP32) */
+typedef struct { wchar_t port[16], name[200]; int likely; } SerPort;
+static SerPort g_ports[32];
+static int g_nports = 0;
+
+static void SerEnumPorts(void) {
+    static const GUID ports = {0x4D36E978, 0xE325, 0x11CE, {0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18}};
+    g_nports = 0;
+    HDEVINFO h = SetupDiGetClassDevsW(&ports, NULL, NULL, DIGCF_PRESENT);
+    if (h == INVALID_HANDLE_VALUE) return;
+    SP_DEVINFO_DATA d;
+    d.cbSize = sizeof d;
+    for (DWORD i = 0; g_nports < 32 && SetupDiEnumDeviceInfo(h, i, &d); i++) {
+        SerPort *p = &g_ports[g_nports];
+        memset(p, 0, sizeof *p);
+        HKEY k = SetupDiOpenDevRegKey(h, &d, DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ);
+        if (k == INVALID_HANDLE_VALUE) continue;
+        DWORD sz = sizeof p->port - sizeof(wchar_t), type = 0;
+        LONG rr = RegQueryValueExW(k, L"PortName", NULL, &type, (BYTE *)p->port, &sz);
+        RegCloseKey(k);
+        if (rr != ERROR_SUCCESS || wcsncmp(p->port, L"COM", 3) != 0) continue;
+        if (!SetupDiGetDeviceRegistryPropertyW(h, &d, SPDRP_FRIENDLYNAME, NULL, (BYTE *)p->name, sizeof p->name - 4, NULL)) wcscpy(p->name, p->port);
+        wchar_t ids[1024] = L"";
+        SetupDiGetDeviceRegistryPropertyW(h, &d, SPDRP_HARDWAREID, NULL, (BYTE *)ids, sizeof ids - 4, NULL);
+        _wcsupr(ids);
+        static const wchar_t *vids[] = {L"VID_2341", L"VID_2A03", L"VID_1A86", L"VID_10C4", L"VID_0403", L"VID_303A", L"VID_239A"};
+        for (int v = 0; v < 7; v++)
+            if (wcsstr(ids, vids[v])) p->likely = 1;
+        g_nports++;
+    }
+    SetupDiDestroyDeviceInfoList(h);
+}
+
+static HANDLE SerOpen(const wchar_t *port) {
+    wchar_t p[40];
+    _snwprintf(p, 39, L"\\\\.\\%ls", port);
+    p[39] = 0;
+    HANDLE h = CreateFileW(p, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return h;
+    DCB dcb;
+    memset(&dcb, 0, sizeof dcb);
+    dcb.DCBlength = sizeof dcb;
+    GetCommState(h, &dcb);
+    dcb.BaudRate = 115200;
+    dcb.ByteSize = 8;
+    dcb.Parity = NOPARITY;
+    dcb.StopBits = ONESTOPBIT;
+    dcb.fBinary = TRUE;
+    dcb.fParity = FALSE;
+    dcb.fOutxCtsFlow = FALSE;
+    dcb.fOutxDsrFlow = FALSE;
+    dcb.fDtrControl = DTR_CONTROL_ENABLE;
+    dcb.fRtsControl = RTS_CONTROL_DISABLE;
+    dcb.fOutX = FALSE;
+    dcb.fInX = FALSE;
+    SetCommState(h, &dcb);
+    COMMTIMEOUTS to = {50, 0, 100, 0, 1000};
+    SetCommTimeouts(h, &to);
+    return h;
+}
+
+static BOOL SerSend(HANDLE h, const char *s) {
+    DWORD w = 0;
+    return WriteFile(h, s, (DWORD)strlen(s), &w, NULL) && w == strlen(s);
+}
+
+/* lê uma linha (sem \r\n); devolve o tamanho ou -1 se esgotar o tempo */
+static int SerLine(HANDLE h, char *out, int max, DWORD ms) {
+    int n = 0;
+    ULONGLONG t0 = GetTickCount64();
+    while (GetTickCount64() - t0 < ms) {
+        char c;
+        DWORD got = 0;
+        if (!ReadFile(h, &c, 1, &got, NULL)) return -1;
+        if (!got) continue;
+        if (c == '\r') continue;
+        if (c == '\n') { out[n] = 0; return n; }
+        if (n < max - 1) out[n++] = c;
+    }
+    out[n] = 0;
+    return -1;
+}
+
+/* envia um comando e junta as linhas até "END" */
+static int SerCmd(HANDLE h, const char *c, char lines[][80], int maxl, DWORD ms) {
+    PurgeComm(h, PURGE_RXCLEAR);
+    if (!SerSend(h, c)) return -1;
+    int n = 0;
+    ULONGLONG t0 = GetTickCount64();
+    while (GetTickCount64() - t0 < ms) {
+        char l[80];
+        if (SerLine(h, l, 80, (DWORD)(ms - (GetTickCount64() - t0))) < 0) break;
+        if (!strcmp(l, "END")) return n;
+        if (n < maxl) strcpy(lines[n++], l);
+    }
+    return n > 0 ? n : -1;
+}
+
+static BOOL ParseHex(const char *s, uint8_t *out, int n) {
+    for (int i = 0; i < n; i++) {
+        unsigned v;
+        if (!s[i * 2] || !s[i * 2 + 1] || sscanf(s + i * 2, "%2x", &v) != 1) return FALSE;
+        out[i] = (uint8_t)v;
+    }
+    return TRUE;
+}
+
+static void LogCid(const uint8_t *b) {
+    wchar_t pnm[6], oid[3];
+    for (int i = 0; i < 5; i++) pnm[i] = (b[3 + i] >= 32 && b[3 + i] < 127) ? (wchar_t)b[3 + i] : L'?';
+    pnm[5] = 0;
+    for (int i = 0; i < 2; i++) oid[i] = (b[1 + i] >= 32 && b[1 + i] < 127) ? (wchar_t)b[1 + i] : L'?';
+    oid[2] = 0;
+    unsigned mdt = ((b[13] & 0x0F) << 8) | b[14];
+    unsigned long psn = ((unsigned long)b[9] << 24) | ((unsigned long)b[10] << 16) | ((unsigned long)b[11] << 8) | b[12];
+    Log(L"CID: fabricante 0x%02X (%ls), OEM \"%ls\", produto \"%ls\", revisão %u.%u, série %08lX, fabricado em %02u/%u.",
+        b[0], MidName(b[0]) ? MidName(b[0]) : L"não identificado", oid, pnm, b[8] >> 4, b[8] & 0x0F, psn, mdt & 0x0F, 2000 + (mdt >> 4));
+}
+
+static uint64_t CsdBytes(const uint8_t *c) {
+    if ((c[0] >> 6) == 1) {
+        uint64_t cs = ((uint64_t)(c[7] & 0x3F) << 16) | ((uint64_t)c[8] << 8) | c[9];
+        return (cs + 1) * 512ULL * 1024ULL;
+    }
+    uint64_t rbl = c[5] & 0x0F;
+    uint64_t cs = ((uint64_t)(c[6] & 0x03) << 10) | ((uint64_t)c[7] << 2) | (c[8] >> 6);
+    uint64_t mult = ((c[9] & 0x03) << 1) | (c[10] >> 7);
+    return (cs + 1) << (mult + 2) << rbl;
+}
+
+static void LogCsd(const uint8_t *c) {
+    wchar_t sz[32];
+    FmtSize(CsdBytes(c), sz, 32);
+    Log(L"CSD: versão %u, capacidade registrada %ls, proteção temporária %ls, proteção permanente %ls, cópia %ls, proteção por grupos %ls.",
+        (c[0] >> 6) + 1, sz, (c[14] & 0x10) ? L"LIGADA" : L"desligada", (c[14] & 0x20) ? L"LIGADA" : L"desligada",
+        (c[14] & 0x40) ? L"sim" : L"não", (c[12] & 0x80) ? L"ativa" : L"inativa");
+}
+
+static BOOL CsdValid(const uint8_t *c) {
+    if ((c[0] >> 6) > 1 || (c[0] & 0x3F) != 0) return FALSE;
+    return c[3] == 0x32 || c[3] == 0x5A || c[3] == 0x0B || c[3] == 0x2B;
+}
+static BOOL CidValid(const uint8_t *b) {
+    for (int i = 0; i < 5; i++)
+        if (b[3 + i] < 32 || b[3 + i] > 126) return FALSE;
+    return b[0] != 0 || b[1] != 0;
+}
+
+/* o driver devolve a resposta R2 numa ordem que varia; testa as ordens possíveis e fica com a que faz sentido */
+static void NormalizeR2(const uint8_t *raw, uint8_t *out, int t) {
+    for (int i = 0; i < 16; i++) {
+        if (t == 0) out[i] = raw[i];
+        else if (t == 1) out[i] = raw[15 - i];
+        else if (t == 2) out[i] = i < 15 ? raw[14 - i] : 0; /* invertida, sem o byte de CRC */
+        else out[i] = i < 15 ? raw[i + 1] : 0;
+    }
+}
+
+static BOOL SffCmd(HANDLE h, UCHAR cmd, uint8_t *out16, DWORD *err) {
+    BYTE buf[sizeof(SffCmdHdr) + sizeof(SdCmdDesc) + 16];
+    memset(buf, 0, sizeof buf);
+    SffCmdHdr *hd = (SffCmdHdr *)buf;
+    hd->HeaderSize = sizeof(SffCmdHdr);
+    hd->Command = 3; /* SFFDISK_DC_DEVICE_COMMAND */
+    hd->ProtocolArgumentSize = sizeof(SdCmdDesc);
+    hd->DeviceDataBufferSize = 16;
+    SdCmdDesc *dd = (SdCmdDesc *)(buf + sizeof(SffCmdHdr));
+    dd->Cmd = cmd;
+    dd->CmdClass = 0;          /* SDCC_STANDARD */
+    dd->TransferDirection = 1; /* SDTD_READ */
+    dd->TransferType = 1;      /* SDTT_CMD_ONLY */
+    dd->ResponseType = 4;      /* SDRT_2 */
+    DWORD br = 0;
+    if (!DeviceIoControl(h, IOCTL_SFFDISK_DEVICE_COMMAND, buf, sizeof buf, buf, sizeof buf, &br, NULL)) {
+        *err = GetLastError();
+        return FALSE;
+    }
+    memcpy(out16, buf + sizeof(SffCmdHdr) + sizeof(SdCmdDesc), 16);
+    for (int i = 0; i < 16; i++)
+        if (out16[i]) return TRUE;
+    *err = ERROR_NOT_SUPPORTED;
+    return FALSE;
+}
+
+typedef struct {
+    BOOL haveCsd, haveCid;
+    uint8_t csd[16], cid[16];
+    int locked;   /* -1 desconhecido */
+    int wtest;    /* -1 não testado, 0 ok, 1 recusada, 2 ignorada, 3 corrompida */
+    int clr;      /* -1 não tentado, 0 desligada, 1 falhou, 2 não estava ligada, 3 permanente */
+    int initErr;  /* Arduino: erro ao iniciar o cartão */
+    BOOL arduino, noReader;
+} CsdRes;
+
+static void CsdVerdict(const CsdRes *r) {
+    Verdict *v = &g_vd;
+    memset(v, 0, sizeof *v);
+    v->op = OP_CSD;
+    v->map = FALSE;
+    v->next = NX_NONE;
+    BOOL tmp = r->haveCsd && (r->csd[14] & 0x10), perm = r->haveCsd && (r->csd[14] & 0x20);
+    if (!r->haveCsd) {
+        v->level = 1;
+        if (r->arduino && r->initErr) {
+            VS(title, L"O cartão não iniciou no Arduino");
+            VS(cause, r->initErr == 1 ? L"O cartão não respondeu ao comando inicial. Pode ser ligação errada, módulo sem conversor de nível ou controladora morta."
+                                      : L"O cartão respondeu, mas não completou a inicialização (código %d). A controladora pode estar com defeito.", r->initErr);
+            VS(card, L"Ainda não dá para saber.");
+            VS(data, L"Ainda não dá para saber.");
+            VS(todo, L"Confira a ligação (arduino/LEIA.md) com outro cartão que funciona. Se o outro funciona e este não, a controladora deste está morta.");
+        } else if (r->arduino) {
+            VS(title, L"O Arduino não leu o registro");
+            VS(cause, L"O Arduino iniciou o cartão, mas o registro CSD não veio.");
+            VS(card, L"Ainda não dá para saber.");
+            VS(data, L"Ainda não dá para saber.");
+            VS(todo, L"Tire e recoloque o cartão no módulo e tente de novo.");
+        } else {
+            VS(title, L"Este leitor não permite ler o registro");
+            VS(cause, r->noReader ? L"O cartão está num leitor USB. Leitores USB não repassam comandos diretos para o cartão."
+                                  : L"O driver deste leitor não aceita comandos diretos. Acontece com leitores USB e com leitores internos que usam driver do fabricante.");
+            VS(card, L"Ainda não dá para saber.");
+            VS(data, L"Ainda não dá para saber.");
+            VS(todo, L"Use o modo Arduino ou ESP32: ele fala direto com o cartão.");
+        }
+        v->valid = TRUE;
+        return;
+    }
+    if (r->locked == 1) {
+        v->level = 1;
+        VS(title, L"Cartão bloqueado por senha");
+        VS(cause, L"O cartão tem uma senha gravada (comando CMD42), recurso usado por alguns celulares e câmeras antigos.");
+        VS(card, L"Sim, com a senha. Sem ela, só apagando o cartão inteiro.");
+        VS(data, L"Só com a senha. Tente no aparelho que colocou a senha.");
+        VS(todo, L"Coloque o cartão de volta no aparelho onde ele foi usado e remova a senha por lá.");
+    } else if (perm) {
+        v->level = 2; v->next = NX_BACKUP;
+        VS(title, L"Proteção permanente ligada");
+        VS(cause, L"O bit de proteção permanente do cartão está ligado. Ele é gravado uma única vez e trava a gravação para sempre.");
+        VS(card, L"Não. Esse bit não pode ser desligado.");
+        VS(data, L"Sim. A leitura continua funcionando.");
+        VS(todo, L"Faça um backup (imagem) do cartão e recupere os arquivos a partir dela.");
+    } else if (r->clr == 0) {
+        v->level = 0;
+        VS(title, L"Proteção temporária desligada");
+        VS(cause, L"O bit de proteção temporária estava ligado e foi desligado com sucesso.");
+        VS(card, r->wtest == 0 ? L"Sim. A gravação funcionou pelo Arduino." : L"Provavelmente. Coloque o cartão no computador e rode o Diagnóstico para confirmar.");
+        VS(data, L"Sim.");
+        VS(todo, L"Coloque o cartão no computador e rode o Diagnóstico com o teste de gravação.");
+    } else if (tmp && r->clr == 1) {
+        v->level = 2; v->next = NX_BACKUP;
+        VS(title, L"Não foi possível desligar a proteção");
+        VS(cause, L"O bit de proteção temporária está ligado, mas o cartão recusou a alteração do registro.");
+        VS(card, L"Provavelmente não. A controladora não aceita mudanças.");
+        VS(data, L"Sim, se a leitura funciona.");
+        VS(todo, L"Faça um backup (imagem) do cartão e recupere os arquivos a partir dela.");
+    } else if (tmp) {
+        v->level = 1;
+        VS(title, L"Proteção temporária ligada");
+        VS(cause, L"O bit de proteção temporária do cartão está ligado. É ele que impede a gravação, e ele pode ser desligado.");
+        VS(card, L"Provavelmente sim.");
+        VS(data, L"Sim. A leitura funciona.");
+        VS(todo, r->arduino ? L"Marque a opção para desligar a proteção temporária e clique em Ler proteção de novo."
+                            : L"Para desligar, use o modo Arduino ou ESP32 (pelo Windows o app só lê o registro).");
+    } else if (r->wtest == 0) {
+        v->level = 1;
+        VS(title, L"O cartão grava normalmente pelo Arduino");
+        VS(cause, L"Não há proteção ligada e a gravação funcionou direto no cartão. Se no computador ela falha, o problema pode ser o leitor ou o adaptador.");
+        VS(card, L"Provavelmente sim. Teste outro leitor ou adaptador no computador.");
+        VS(data, L"Sim.");
+        VS(todo, L"Troque o leitor ou o adaptador SD e rode o Diagnóstico de novo.");
+    } else if (r->wtest >= 1) {
+        v->level = 2; v->next = NX_BACKUP;
+        VS(title, L"Firmware travado em somente leitura");
+        VS(cause, r->wtest == 1 ? L"Não há proteção ligada no registro, mas o cartão recusou a gravação direto no Arduino. Quem bloqueia é o firmware da controladora."
+                                : (r->wtest == 2 ? L"Não há proteção ligada, mas o cartão finge que grava e o conteúdo não muda: a controladora travou a memória."
+                                                 : L"Não há proteção ligada, mas o que é gravado volta diferente: memória ou controladora com defeito."));
+        VS(card, L"Não. Esse bloqueio fica no firmware e não sai por software nem pelo Arduino.");
+        VS(data, L"Sim, se a leitura funciona. Copie tudo antes que piore.");
+        VS(todo, L"Faça um backup (imagem) do cartão e recupere os arquivos a partir dela. Depois, descarte o cartão.");
+    } else {
+        v->level = 1; v->next = NX_BACKUP;
+        VS(title, L"Nenhuma proteção ligada no registro");
+        VS(cause, L"Os bits de proteção do cartão estão desligados. Se ele recusa gravações, quem bloqueia é o firmware da controladora.");
+        VS(card, L"Se ele recusa gravações, não: esse modo não sai por software.");
+        VS(data, L"Sim, se a leitura funciona.");
+        VS(todo, L"Rode o Diagnóstico para confirmar e faça um backup (imagem) se o cartão estiver travado.");
+    }
+    v->valid = TRUE;
+}
+
+static BOOL DoCsdInternal(Job *j) {
+    CsdRes r;
+    memset(&r, 0, sizeof r);
+    r.locked = -1; r.wtest = -1; r.clr = -1;
+    SetIndet(L"Lendo os registros do cartão pelo leitor interno...");
+    Log(L"Modo leitor interno: Disco %d (%ls).", j->src, j->di.label);
+    if (j->di.bus == BusTypeUsb) {
+        Log(L"O cartão está num leitor USB; esse tipo de leitor não repassa comandos SD.");
+        r.noReader = TRUE;
+        CsdVerdict(&r);
+        return TRUE;
+    }
+    wchar_t paths[28][32];
+    int np = 0;
+    _snwprintf(paths[np++], 31, L"\\\\.\\PhysicalDrive%d", j->src);
+    for (const wchar_t *c = j->di.letters; *c && np < 28; c++)
+        if (*c >= L'A' && *c <= L'Z' && c[1] == L':') _snwprintf(paths[np++], 31, L"\\\\.\\%c:", *c);
+    DWORD err = 0;
+    for (int p = 0; p < np && !r.haveCsd; p++) {
+        HANDLE h = CreateFileW(paths[p], GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        if (h == INVALID_HANDLE_VALUE) { err = GetLastError(); continue; }
+        uint8_t rc[16], rd[16];
+        BOOL okc = SffCmd(h, 9, rc, &err);
+        BOOL okd = okc && SffCmd(h, 10, rd, &err);
+        CloseHandle(h);
+        if (!okc) continue;
+        Log(L"Resposta bruta do CSD: %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X", rc[0], rc[1], rc[2], rc[3], rc[4], rc[5], rc[6], rc[7], rc[8], rc[9], rc[10], rc[11], rc[12], rc[13], rc[14], rc[15]);
+        for (int t = 0; t < 4 && !r.haveCsd; t++) {
+            uint8_t c[16];
+            NormalizeR2(rc, c, t);
+            if (!CsdValid(c)) continue;
+            memcpy(r.csd, c, 16);
+            r.haveCsd = TRUE;
+            if (okd) {
+                NormalizeR2(rd, r.cid, t);
+                r.haveCid = CidValid(r.cid);
+            }
+        }
+        if (!r.haveCsd) Log(L"A resposta do leitor não pôde ser interpretada como um registro CSD.");
+    }
+    if (!r.haveCsd && err) { SetLastError(err); LogErr(L"enviar comando direto ao cartão"); }
+    if (r.haveCid) LogCid(r.cid);
+    if (r.haveCsd) {
+        LogCsd(r.csd);
+        wchar_t a[32], b[32];
+        FmtSize(CsdBytes(r.csd), a, 32);
+        FmtSize(j->srcSize, b, 32);
+        if (CsdBytes(r.csd) != j->srcSize) Log(L"Capacidade no registro: %ls; capacidade que o Windows vê: %ls.", a, b);
+    }
+    CsdVerdict(&r);
+    Log(L"Resultado: %ls.", g_vd.title);
+    return TRUE;
+}
+
+static BOOL DoCsdArduino(Job *j) {
+    CsdRes r;
+    memset(&r, 0, sizeof r);
+    r.locked = -1; r.wtest = -1; r.clr = -1; r.arduino = TRUE;
+    char L[16][80];
+    SetIndet(L"Conectando ao Arduino...");
+    Log(L"Modo Arduino/ESP32 na porta %ls.", j->file);
+    HANDLE h = SerOpen(j->file);
+    if (h == INVALID_HANDLE_VALUE) {
+        LogErr(L"abrir a porta do Arduino");
+        SetSummary(MB_ICONWARNING, L"Não foi possível abrir a porta %ls.\n\nFeche o Monitor Serial da IDE do Arduino ou outro programa que esteja usando a porta.", j->file);
+        return FALSE;
+    }
+    Sleep(2000); /* a maioria das placas reinicia ao abrir a porta */
+    BOOL hello = FALSE;
+    for (int t = 0; t < 4 && !hello; t++) {
+        int n = SerCmd(h, "SDT?\n", L, 16, 1200);
+        for (int i = 0; i < n; i++)
+            if (!strncmp(L[i], "SDTOOLS ", 8)) { hello = TRUE; Log(L"Placa respondeu: %hs.", L[i]); }
+    }
+    if (!hello) {
+        CloseHandle(h);
+        Log(L"O dispositivo em %ls não respondeu como SD Clone Tools.", j->file);
+        SetSummary(MB_ICONWARNING, L"A placa em %ls não respondeu.\n\nGrave nela o programa arduino\\sdtools_arduino\\sdtools_arduino.ino (veja arduino\\LEIA.md) e tente de novo.", j->file);
+        return FALSE;
+    }
+    if (g_cancel) { CloseHandle(h); return FALSE; }
+    SetIndet(L"Lendo os registros do cartão...");
+    int n = SerCmd(h, "INFO\n", L, 16, 8000);
+    for (int i = 0; i < n; i++) {
+        if (!strncmp(L[i], "INIT ERR ", 9)) r.initErr = atoi(L[i] + 9);
+        else if (!strncmp(L[i], "INIT OK", 7)) Log(L"Cartão iniciado: %hs.", L[i] + 8);
+        else if (!strncmp(L[i], "CID ", 4) && ParseHex(L[i] + 4, r.cid, 16)) r.haveCid = TRUE;
+        else if (!strncmp(L[i], "CSD ", 4) && ParseHex(L[i] + 4, r.csd, 16)) r.haveCsd = TRUE;
+        else if (!strncmp(L[i], "STATUS ", 7)) {
+            uint8_t s[2];
+            if (ParseHex(L[i] + 7, s, 2)) r.locked = (s[1] & 0x01) ? 1 : 0;
+        }
+    }
+    if (n < 0) Log(L"A placa não respondeu ao pedido de leitura.");
+    if (r.initErr) Log(L"O cartão não iniciou no Arduino (código %d).", r.initErr);
+    if (r.haveCid) LogCid(r.cid);
+    if (r.haveCsd) LogCsd(r.csd);
+    if (r.locked == 1) Log(L"O cartão está BLOQUEADO POR SENHA.");
+    BOOL perm = r.haveCsd && (r.csd[14] & 0x20), tmp = r.haveCsd && (r.csd[14] & 0x10);
+    if (r.haveCsd && j->mode == 1 && tmp && !perm && r.locked != 1 && !g_cancel) {
+        SetIndet(L"Desligando a proteção temporária...");
+        n = SerCmd(h, "CLRTMP\n", L, 16, 8000);
+        r.clr = 1;
+        for (int i = 0; i < n; i++) {
+            if (!strcmp(L[i], "CLRTMP OK")) r.clr = 0;
+            else if (!strcmp(L[i], "CLRTMP NOTSET")) r.clr = 2;
+            else if (!strcmp(L[i], "CLRTMP PERM")) r.clr = 3;
+            else if (!strncmp(L[i], "CSD ", 4)) ParseHex(L[i] + 4, r.csd, 16);
+        }
+        Log(r.clr == 0 ? L"Proteção temporária desligada." : L"O cartão recusou a alteração do registro.");
+    }
+    if (r.haveCsd && j->verify && r.locked != 1 && !g_cancel) {
+        SetIndet(L"Testando a gravação pelo Arduino...");
+        n = SerCmd(h, "WTEST\n", L, 16, 10000);
+        for (int i = 0; i < n; i++) {
+            if (!strcmp(L[i], "WTEST OK")) r.wtest = 0;
+            else if (!strncmp(L[i], "WTEST REJECT", 12)) { r.wtest = 1; Log(L"O cartão recusou a gravação (%hs).", L[i] + 13); }
+            else if (!strcmp(L[i], "WTEST IGNORED")) r.wtest = 2;
+            else if (!strcmp(L[i], "WTEST CORRUPT")) r.wtest = 3;
+            else if (!strcmp(L[i], "RESTORE ERR")) Log(L"ATENÇÃO: não foi possível devolver o conteúdo original do bloco de teste.");
+        }
+        Log(r.wtest == 0 ? L"Gravação pelo Arduino: funciona (conteúdo original devolvido)."
+            : r.wtest == 1 ? L"Gravação pelo Arduino: recusada." : r.wtest == 2 ? L"Gravação pelo Arduino: ignorada (o conteúdo não mudou)."
+            : r.wtest == 3 ? L"Gravação pelo Arduino: o conteúdo voltou diferente." : L"Gravação pelo Arduino: não foi possível testar.");
+    }
+    CloseHandle(h);
+    CsdVerdict(&r);
+    Log(L"Resultado: %ls.", g_vd.title);
+    return TRUE;
+}
+
+/* "Copiar só os dados" (destino menor que a origem): o código desta função não está no repositório.
+ * A opção foi removida da interface; este stub só mantém o programa compilando. */
+static BOOL DoSmartCopy(Job *j) {
+    (void)j;
+    Log(L"Copiar só os dados para um cartão menor ainda não está disponível. Use um cartão de destino do mesmo tamanho ou maior.");
+    SetSummary(MB_ICONWARNING, L"Copiar só os dados para um cartão menor ainda não está disponível.\n\nUse um cartão de destino do mesmo tamanho ou maior.");
+    return FALSE;
+}
 
 static DWORD WINAPI Worker(LPVOID p) {
     Job *j = &g_job;
@@ -1418,6 +2364,8 @@ static DWORD WINAPI Worker(LPVOID p) {
         }
         break;
     case OP_AUTH: ok = DoAuth(j); break;
+    case OP_DIAG: ok = DoHealth(j); break;
+    case OP_CSD: ok = j->cls ? DoCsdArduino(j) : DoCsdInternal(j); break;
     }
     Log(ok ? L"=== Fim: concluído ===" : L"=== Fim: não concluído ===");
     PostMessageW(g_hwnd, WM_APP_DONE, ok, 0);
@@ -1435,17 +2383,127 @@ static int RecoverMode(void) {
 }
 
 static const wchar_t *RECOVER_MODES[] = {
-    L"1. Diagnosticar o cartão: descobrir o que há de errado (não altera nada)",
-    L"2. Ver / copiar arquivos, inclusive de partições que o Windows não vê",
-    L"3. Reconstruir partições perdidas (cartão sem acesso/RAW; preserva os dados)",
-    L"4. Recuperar arquivos apagados (fotos, vídeos MP4/MOV, PDF)",
-    L"5. Restaurar o cartão: apaga TUDO e formata de novo (devolve a capacidade total)"};
+    L"Análise detalhada de partições (não altera nada)",
+    L"Ver e copiar arquivos, inclusive de partições Linux",
+    L"Reconstruir partições perdidas (não apaga dados)",
+    L"Recuperar arquivos apagados (fotos, vídeos, PDF)",
+    L"Restaurar o cartão: apaga tudo e formata"};
 static const wchar_t *RECOVER_DESC[] = {
-    L"Analisa o cartão sem alterar nada: capacidade informada, tabela de partições, sistemas de arquivos e partições perdidas. Explica por que o cartão mostra pouca capacidade ou fica sem acesso, e o que fazer.",
-    L"Abre as partições do cartão (FAT, exFAT, ext4 de consoles Linux), inclusive as que o Windows não mostra, e permite copiar os arquivos para o PC. Somente leitura.",
-    L"Reescreve a tabela de partições (MBR) usando as partições encontradas no cartão. NÃO apaga dados. Guarda uma cópia do início do cartão em Documentos antes de alterar.",
-    L"Procura no cartão inteiro fotos (JPG/PNG), vídeos (MP4/MOV) e PDFs apagados e os salva numa pasta do PC. Só lê o cartão.",
-    L"Apaga tudo, cria uma partição do tamanho total e formata (FAT32 até 32 GB, exFAT acima). Use depois de salvar os dados; não conserta cartão que informa capacidade errada."};
+    L"Analisa o cartão sem alterar nada: capacidade informada, tabela de partições, sistemas de arquivos e partições perdidas. Explica por que o cartão mostra pouca capacidade ou fica sem acesso.",
+    L"Abre as partições do cartão (FAT, exFAT, ext4 de consoles Linux), inclusive as que o Windows não mostra, e copia os arquivos para o PC. Somente leitura.",
+    L"Reescreve a tabela de partições (MBR) usando as partições encontradas no cartão. Não apaga dados e guarda uma cópia do início do cartão em Documentos antes de alterar.",
+    L"Procura fotos (JPG/PNG), vídeos (MP4/MOV) e PDFs no cartão inteiro ou em um arquivo de imagem e os salva numa pasta do PC. Só lê.",
+    L"Apaga tudo, cria uma partição do tamanho total e formata (FAT32 até 32 GB, exFAT acima). Use depois de salvar os dados; não conserta cartão travado em somente leitura."};
+
+/* ---------------------------------------------------------------- layout */
+static int g_cardBot = TASK_Y + 100, g_areaTop = 400;
+/* "vista de resultado": no Diagnóstico e na Proteção, depois de iniciar, o formulário some e o resultado ocupa a página */
+static BOOL g_resView = FALSE;
+static const int TASK_CTLS[] = {ID_DESC, ID_LBL2, ID_COMBO2, ID_COMBOB, ID_COMBOC, ID_LBLFILE, ID_EDITFILE, ID_BROWSE,
+                                ID_CHK1, ID_CHK2, ID_RADA, ID_RADB, ID_WARN, ID_COMBOP, ID_DETECT};
+
+static BOOL CtlVisible(int id) {
+    HWND c = Ctl(id);
+    return c && (GetWindowLongW(c, GWL_STYLE) & WS_VISIBLE) != 0;
+}
+static void Place(int id, int x, int y, int w, int h) { MoveWindow(Ctl(id), S(x), S(y), S(w), S(h), TRUE); }
+
+/* altura (em pixels lógicos) de um texto quebrado em linhas numa largura lógica */
+static int TextH(const wchar_t *t, int w, HFONT f) {
+    HDC dc = GetDC(g_hwnd);
+    HGDIOBJ o = SelectObject(dc, f);
+    RECT r = {0, 0, S(w), 0};
+    DrawTextW(dc, t, -1, &r, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+    SelectObject(dc, o);
+    ReleaseDC(g_hwnd, dc);
+    return MulDiv(r.bottom, 96, g_dpi) + 1;
+}
+
+/* posiciona tudo: cartão do dispositivo, campos visíveis da tarefa, ações e área de resultado/registro */
+static void Relayout(void) {
+    int refw = g_fontIcon ? 32 : 92;
+    Place(ID_LBL1, MX + 56, DEV_Y + 12, 400, 18);
+    Place(ID_SHOWALL, MX + MW - 16 - 180, DEV_Y + 10, 180, 22);
+    Place(ID_COMBO1, MX + 56, DEV_Y + 32, MW - 56 - 16 - refw - 8, 300);
+    Place(ID_REFRESH, MX + MW - 16 - refw, DEV_Y + 32, refw, 32);
+
+    const int X = MX + CARD_PAD, W = MW - 2 * CARD_PAD;
+    int y = TASK_Y + CARD_PAD, gap = 0;
+    wchar_t d[600];
+    GetDlgItemTextW(g_hwnd, ID_DESC, d, 600);
+    int dh = TextH(d, W, g_font);
+    Place(ID_DESC, X, y, W, dh);
+    y += dh + 14; gap = 14;
+    if (CtlVisible(ID_RADA)) { Place(ID_RADA, X, y, W, 24); y += 32; Place(ID_RADB, X, y, W, 24); y += 32 + 8; gap = 16; }
+    if (CtlVisible(ID_COMBOP)) {
+        Place(ID_LBL2, X, y, W, 20);
+        y += 24;
+        Place(ID_COMBOP, X, y, W - 108, 300);
+        Place(ID_DETECT, X + W - 100, y, 100, 32);
+        y += 32 + 16; gap = 16;
+    } else if (CtlVisible(ID_LBL2)) {
+        Place(ID_LBL2, X, y, W, 20);
+        y += 24;
+        if (CtlVisible(ID_COMBO2)) Place(ID_COMBO2, X, y, W, 300);
+        if (CtlVisible(ID_COMBOB)) {
+            if (CtlVisible(ID_COMBOC)) {
+                int bw = W * 55 / 100;
+                Place(ID_COMBOB, X, y, bw, 300);
+                Place(ID_COMBOC, X + bw + 12, y, W - bw - 12, 300);
+            } else
+                Place(ID_COMBOB, X, y, W, 300);
+        }
+        y += 32 + 16; gap = 16;
+    }
+    if (CtlVisible(ID_LBLFILE)) {
+        Place(ID_LBLFILE, X, y, W, 20);
+        y += 24;
+        Place(ID_EDITFILE, X, y, W - 108, 32);
+        Place(ID_BROWSE, X + W - 100, y, 100, 32);
+        y += 32 + 16; gap = 16;
+    }
+    if (CtlVisible(ID_CHK1)) { Place(ID_CHK1, X, y, W, 24); y += 32; gap = 8; }
+    if (CtlVisible(ID_CHK2)) { Place(ID_CHK2, X, y, W, 24); y += 32; gap = 8; }
+    if (CtlVisible(ID_WARN)) { y += 8 - gap; Place(ID_WARN, X, y, W, 40); y += 40; gap = 0; }
+    g_cardBot = y - gap + CARD_PAD;
+    int ay = g_cardBot + 16;
+    if (g_resView) { g_cardBot = 0; ay = TASK_Y; }
+    Place(ID_START, MX, ay, 180, 32);
+    Place(ID_CANCELBTN, MX + 188, ay, 110, 32);
+    Place(ID_NEXT, MX + 188, ay, 200, 32); /* no lugar do Cancelar, que some quando nada está rodando */
+    Place(ID_LOGBTN, MX + MW - 170, ay, 170, 32);
+    Place(ID_OPTS, MX + MW - 170 - 150, ay, 150, 32);
+    Place(ID_PROGRESS, MX, ay + 44, MW, 4);
+    Place(ID_STATUS, MX, ay + 54, MW, 18);
+    g_areaTop = ay + 80;
+    int ah = WIN_H - 16 - g_areaTop;
+    if (ah < 60) ah = 60;
+    Place(ID_RESULT, MX, g_areaTop, MW, ah);
+    Place(ID_LOG, MX + 10, g_areaTop + 8, MW - 20, ah - 16);
+    InvalidateRect(g_hwnd, NULL, TRUE);
+}
+
+/* área inferior: no Diagnóstico alterna entre o veredito e o registro técnico; nas outras tarefas mostra o registro */
+static void ShowArea(void) {
+    BOOL diag = (g_op == OP_DIAG || g_op == OP_CSD);
+    BOOL log = !diag || g_showLog;
+    BOOL rv = diag && g_resView;
+    if (rv)
+        for (int i = 0; i < (int)(sizeof TASK_CTLS / sizeof TASK_CTLS[0]); i++) ShowCtl(TASK_CTLS[i], FALSE);
+    ShowCtl(ID_OPTS, rv && !g_busy);
+    ShowCtl(ID_CANCELBTN, !diag || g_busy);
+    ShowCtl(ID_RESULT, !log);
+    ShowCtl(ID_LOG, log);
+    ShowCtl(ID_LOGBTN, diag);
+    SetDlgItemTextW(g_hwnd, ID_LOGBTN, log ? L"Ver resultado" : L"Ver registro técnico");
+    BOOL nx = diag && !g_busy && g_vd.valid && g_vd.op == g_op && g_vd.next != NX_NONE;
+    if (nx) SetDlgItemTextW(g_hwnd, ID_NEXT, NX_TEXT[g_vd.next]);
+    ShowCtl(ID_NEXT, nx);
+    InvalidateRect(Ctl(ID_RESULT), NULL, FALSE);
+    InvalidateRect(Ctl(ID_LOGBTN), NULL, FALSE);
+    InvalidateRect(Ctl(ID_NEXT), NULL, FALSE);
+    InvalidateRect(g_hwnd, NULL, TRUE);
+}
 
 static void RecoverUi(void) {
     int m = RecoverMode();
@@ -1453,6 +2511,8 @@ static void RecoverUi(void) {
     ShowCtl(ID_LBLFILE, f);
     ShowCtl(ID_EDITFILE, f);
     ShowCtl(ID_BROWSE, f);
+    ShowCtl(ID_CHK1, f);
+    if (!f) SetChk(ID_CHK1, FALSE);
     if (m >= 0 && m < RM_COUNT) SetDlgItemTextW(g_hwnd, ID_DESC, RECOVER_DESC[m]);
     UpdateEnable();
 }
@@ -1462,93 +2522,191 @@ static void FillModeCombo(int op) {
     SendMessageW(c, CB_RESETCONTENT, 0, 0);
     if (op == OP_RECOVER) {
         for (int i = 0; i < RM_COUNT; i++) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)RECOVER_MODES[i]);
-        MoveWindow(c, S(10), S(168 + HDR), S(620), S(240), TRUE);
     } else {
         for (int i = 0; i < NBRANDS; i++) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)BRANDS[i].name);
-        MoveWindow(c, S(10), S(168 + HDR), S(300), S(240), TRUE);
     }
     SendMessageW(c, CB_SETCURSEL, 0, 0);
 }
 
 static void UpdateEnable(void) {
+    if (g_op < 0) return;
     BOOL fileOn = TRUE;
     if (g_op == OP_VERIFY) {
         if (Checked(ID_CHK2)) SetChk(ID_CHK1, FALSE);
         EnableCtl(ID_CHK1, !Checked(ID_CHK2));
         fileOn = Checked(ID_CHK1) && !Checked(ID_CHK2);
     } else if (g_op == OP_RECOVER) fileOn = (RecoverMode() == RM_CARVE);
+    if (g_op == OP_CSD) {
+        BOOL ard = Checked(ID_RADB);
+        ShowCtl(ID_LBL2, ard);
+        ShowCtl(ID_COMBOP, ard);
+        ShowCtl(ID_DETECT, ard);
+        ShowCtl(ID_CHK1, ard);
+        ShowCtl(ID_CHK2, ard);
+        SetDlgItemTextW(g_hwnd, ID_LBL1, ard ? L"Cartão (no modo Arduino o cartão fica no módulo, esta seleção não é usada)" : L"Cartão (no leitor interno do computador)");
+    }
     g_fileOn = fileOn;
     InvalidateRect(Ctl(ID_LBLFILE), NULL, TRUE);
     EnableCtl(ID_EDITFILE, fileOn);
     EnableCtl(ID_BROWSE, fileOn);
+
+    const wchar_t *warn = NULL;
+    switch (g_op) {
+    case OP_I2C:
+    case OP_C2C: warn = L"Todo o conteúdo do cartão de destino será apagado."; break;
+    case OP_VERIFY:
+        if (Checked(ID_CHK2)) warn = L"O teste de capacidade apaga todo o cartão e pode levar horas.";
+        break;
+    case OP_AUTH:
+        if (Checked(ID_CHK1)) warn = L"O teste completo apaga todo o cartão e pode levar horas.";
+        break;
+    case OP_RECOVER:
+        if (RecoverMode() == RM_RESTORE) warn = L"Esta opção apaga todas as partições e dados do cartão.";
+        break;
+    case OP_CSD:
+        if (Checked(ID_RADB) && Checked(ID_CHK1)) warn = L"Vai regravar o registro CSD do cartão (só o bit de proteção temporária).";
+        break;
+    }
+    ShowCtl(ID_WARN, warn != NULL);
+    if (warn) {
+        SetDlgItemTextW(g_hwnd, ID_WARN, warn);
+        InvalidateRect(Ctl(ID_WARN), NULL, TRUE);
+    }
+    int rm = RecoverMode();
+    const wchar_t *st = (g_op == OP_RECOVER) ? ((rm >= 0 && rm < RM_COUNT) ? RECOVER_START[rm] : L"Iniciar") : START_T[g_op];
+    SetDlgItemTextW(g_hwnd, ID_START, st);
+    InvalidateRect(Ctl(ID_START), NULL, FALSE);
+    Relayout();
+}
+
+static void FillPorts(void) {
+    HWND c = Ctl(ID_COMBOP);
+    int sel = 0;
+    SerEnumPorts();
+    SendMessageW(c, CB_RESETCONTENT, 0, 0);
+    for (int i = 0; i < g_nports; i++) {
+        wchar_t t[260];
+        _snwprintf(t, 259, L"%ls%ls", g_ports[i].name, g_ports[i].likely ? L"  (provável Arduino/ESP32)" : L"");
+        t[259] = 0;
+        int at = (int)SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)t);
+        SendMessageW(c, CB_SETITEMDATA, at, i);
+        if (g_ports[i].likely && !g_ports[sel].likely) sel = at;
+    }
+    if (g_nports == 0) {
+        int at = (int)SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"Nenhum Arduino encontrado: conecte a placa pelo USB e clique em Detectar");
+        SendMessageW(c, CB_SETITEMDATA, at, (LPARAM)-1);
+    }
+    SendMessageW(c, CB_SETCURSEL, sel, 0);
+}
+
+static void RedrawNav(void) {
+    for (int i = 0; i < OP_COUNT; i++) InvalidateRect(Ctl(ID_OP0 + i), NULL, FALSE);
 }
 
 static void ApplyOp(int op) {
     static const wchar_t *desc[] = {
-        L"Cria um arquivo de imagem (.img) com uma cópia exata, setor por setor, de todo o cartão. Serve para backup ou para clonar depois.",
-        L"Grava um arquivo de imagem (.img, .iso, .bin) no cartão. TODO o conteúdo atual do cartão será apagado.",
-        L"Copia diretamente um cartão para outro (o destino deve ser igual ou maior). TODO o conteúdo do destino será apagado.",
-        L"Lê o cartão inteiro procurando setores ilegíveis. Opcionalmente compara com uma imagem. Para saber se a capacidade é verdadeira, use Autenticidade.",
-        L"Repara cartão sem acesso ou com capacidade errada: diagnostica e explica o problema, abre partições que o Windows não vê, reconstrói partições perdidas, recupera arquivos apagados ou restaura o cartão.",
-        L"Descobre se o cartão é verdadeiro ou falso (SanDisk, Samsung, Kingston, Lexar...): fabricante gravado no cartão, capacidade real e velocidade."};
+        L"Cria um arquivo .img com uma cópia exata do cartão, setor por setor. Áreas ilegíveis são puladas para o backup não travar.",
+        L"Grava um arquivo de imagem (.img, .iso, .bin) no cartão e confere a gravação.",
+        L"Copia um cartão direto em outro. O destino precisa ser do mesmo tamanho ou maior.",
+        L"Lê o cartão inteiro procurando setores ilegíveis e, se quiser, compara com uma imagem.",
+        L"Repara cartão sem acesso ou com capacidade errada e recupera arquivos.",
+        L"Descobre se o cartão é verdadeiro: fabricante gravado no cartão, capacidade real e velocidade.",
+        L"Descobre o defeito do cartão, se ele tem conserto e se os dados podem ser salvos.",
+        L"Lê os registros internos do cartão (CID e CSD) e mostra se a gravação está travada por um bit de proteção, por senha ou pelo firmware."};
     g_op = op;
-    for (int i = 0; i < 6; i++) InvalidateRect(Ctl(ID_OP0 + i), NULL, FALSE);
+    g_hover = 0;
+    g_resView = FALSE;
+    RedrawNav();
+    ShowCtl(ID_DESC, TRUE);
+    SetDlgItemTextW(g_hwnd, ID_TITLE, NAV_T[op]);
     SetDlgItemTextW(g_hwnd, ID_DESC, desc[op]);
     ShowCtl(ID_LBL2, op == OP_C2C || op == OP_AUTH || op == OP_RECOVER);
     ShowCtl(ID_COMBO2, op == OP_C2C);
     ShowCtl(ID_COMBOB, op == OP_AUTH || op == OP_RECOVER);
     if (op == OP_AUTH || op == OP_RECOVER) FillModeCombo(op);
     ShowCtl(ID_COMBOC, op == OP_AUTH);
-    ShowCtl(ID_LBLFILE, op != OP_C2C && op != OP_AUTH);
-    ShowCtl(ID_EDITFILE, op != OP_C2C && op != OP_AUTH);
-    ShowCtl(ID_BROWSE, op != OP_C2C && op != OP_AUTH);
-    ShowCtl(ID_CHK1, op <= OP_VERIFY || op == OP_AUTH);
-    ShowCtl(ID_CHK2, op == OP_VERIFY || op == OP_C2C);
-    ShowCtl(ID_RADA, FALSE);
-    ShowCtl(ID_RADB, FALSE);
+    BOOL file = (op == OP_C2I || op == OP_I2C || op == OP_VERIFY || op == OP_RECOVER);
+    ShowCtl(ID_LBLFILE, file);
+    ShowCtl(ID_EDITFILE, file);
+    ShowCtl(ID_BROWSE, file);
+    ShowCtl(ID_CHK1, op <= OP_VERIFY || op == OP_AUTH || op == OP_DIAG);
+    ShowCtl(ID_CHK2, op == OP_VERIFY);
+    ShowCtl(ID_RADA, op == OP_CSD);
+    ShowCtl(ID_RADB, op == OP_CSD);
+    ShowCtl(ID_COMBOP, FALSE);
+    ShowCtl(ID_DETECT, FALSE);
     EnableCtl(ID_CHK1, TRUE);
     SetChk(ID_CHK1, FALSE);
     SetChk(ID_CHK2, FALSE);
     switch (op) {
     case OP_C2I:
-        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão de origem:");
-        SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Salvar a imagem em (arquivo .img):");
-        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Verificar a imagem depois de criar (compara com o cartão; demora mais)");
+        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão de origem");
+        SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Salvar a imagem em");
+        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Conferir a imagem depois de criar (demora mais)");
         break;
     case OP_I2C:
-        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão de destino (SERÁ APAGADO):");
-        SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Arquivo de imagem (.img, .iso, .bin):");
-        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Verificar depois de gravar (recomendado)");
+        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão de destino (será apagado)");
+        SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Arquivo de imagem (.img, .iso, .bin)");
+        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Conferir depois de gravar (recomendado)");
         SetChk(ID_CHK1, TRUE);
         break;
     case OP_C2C:
-        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão de origem:");
-        SetDlgItemTextW(g_hwnd, ID_LBL2, L"Cartão de destino (SERÁ APAGADO):");
-        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Verificar depois de copiar (recomendado)");
-        SetDlgItemTextW(g_hwnd, ID_CHK2, L"Copiar só os dados (o destino pode ser MENOR que a origem)");
+        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão de origem");
+        SetDlgItemTextW(g_hwnd, ID_LBL2, L"Cartão de destino (será apagado)");
+        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Conferir depois de copiar (recomendado)");
         SetChk(ID_CHK1, TRUE);
         break;
     case OP_VERIFY:
-        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão a verificar:");
-        SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Arquivo de imagem para comparar:");
-        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Comparar também com um arquivo de imagem");
-        SetDlgItemTextW(g_hwnd, ID_CHK2, L"Teste de capacidade real, estilo H2testw (APAGA todo o cartão; muito demorado)");
+        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão");
+        SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Imagem para comparar");
+        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Comparar com um arquivo de imagem");
+        SetDlgItemTextW(g_hwnd, ID_CHK2, L"Teste de capacidade real, estilo H2testw (apaga o cartão; demora horas)");
         break;
     case OP_RECOVER:
-        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão:");
-        SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Pasta onde salvar os arquivos recuperados (NÃO use o próprio cartão):");
-        SetDlgItemTextW(g_hwnd, ID_LBL2, L"O que fazer com o cartão:");
+        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão");
+        SetDlgItemTextW(g_hwnd, ID_LBL2, L"O que fazer");
+        SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Pasta para salvar os arquivos (fora do cartão)");
+        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Ler de um arquivo de imagem (.img) em vez do cartão");
         break;
     case OP_AUTH:
-        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão a analisar:");
-        SetDlgItemTextW(g_hwnd, ID_LBL2, L"Marca escrita na etiqueta  /  classe de velocidade anunciada:");
-        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Teste completo de capacidade e velocidade (APAGA todo o cartão; é o único que prova a capacidade)");
+        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão");
+        SetDlgItemTextW(g_hwnd, ID_LBL2, L"Marca da etiqueta e classe de velocidade anunciada");
+        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Teste completo de capacidade e velocidade (apaga o cartão; demora horas)");
+        break;
+    case OP_CSD:
+        SetDlgItemTextW(g_hwnd, ID_RADA, L"Leitor interno do computador (só lê os registros)");
+        SetDlgItemTextW(g_hwnd, ID_RADB, L"Arduino ou ESP32 conectado por USB (lê, testa e pode desligar a proteção)");
+        SetDlgItemTextW(g_hwnd, ID_LBL2, L"Porta do Arduino");
+        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Tentar desligar a proteção temporária, se estiver ligada");
+        SetDlgItemTextW(g_hwnd, ID_CHK2, L"Testar gravação pelo Arduino (grava 1 bloco e devolve o original)");
+        if (!Checked(ID_RADA) && !Checked(ID_RADB)) SetChk(ID_RADA, TRUE);
+        SetChk(ID_CHK2, TRUE);
+        FillPorts();
+        break;
+    case OP_DIAG:
+        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão");
+        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Testar gravação (grava 4 KB em 2 pontos e devolve o conteúdo original)");
+        SetChk(ID_CHK1, TRUE);
         break;
     }
     SetDlgItemTextW(g_hwnd, ID_EDITFILE, L"");
     if (op == OP_RECOVER) RecoverUi();
     else UpdateEnable();
-    InvalidateRect(g_hwnd, NULL, TRUE);
+    ShowArea();
+}
+
+static void OnNext(void) {
+    switch (g_vd.next) {
+    case NX_BACKUP: ApplyOp(OP_C2I); break;
+    case NX_AUTH: ApplyOp(OP_AUTH); break;
+    case NX_CARVE:
+    case NX_REBUILD:
+    case NX_RESTORE:
+        ApplyOp(OP_RECOVER);
+        SendMessageW(Ctl(ID_COMBOB), CB_SETCURSEL, g_vd.next == NX_CARVE ? RM_CARVE : (g_vd.next == NX_REBUILD ? RM_REBUILD : RM_RESTORE), 0);
+        RecoverUi();
+        break;
+    }
 }
 
 static void AppendLog(const wchar_t *s) {
@@ -1560,7 +2718,7 @@ static void AppendLog(const wchar_t *s) {
 
 static void SetBusy(BOOL b) {
     g_busy = b;
-    for (int i = 0; i < 6; i++) EnableCtl(ID_OP0 + i, !b);
+    for (int i = 0; i < OP_COUNT; i++) EnableCtl(ID_OP0 + i, !b);
     EnableCtl(ID_COMBO1, !b); EnableCtl(ID_COMBO2, !b); EnableCtl(ID_COMBOB, !b); EnableCtl(ID_COMBOC, !b);
     EnableCtl(ID_REFRESH, !b); EnableCtl(ID_SHOWALL, !b);
     EnableCtl(ID_CHK1, !b); EnableCtl(ID_CHK2, !b); EnableCtl(ID_RADA, !b); EnableCtl(ID_RADB, !b);
@@ -1568,6 +2726,7 @@ static void SetBusy(BOOL b) {
     EnableCtl(ID_CANCELBTN, b);
     if (b) { EnableCtl(ID_EDITFILE, FALSE); EnableCtl(ID_BROWSE, FALSE); g_fileOn = FALSE; InvalidateRect(Ctl(ID_LBLFILE), NULL, TRUE); }
     else UpdateEnable();
+    ShowArea();
 }
 
 static void UpdateProgress(void) {
@@ -1612,6 +2771,7 @@ static BOOL Confirm(const wchar_t *t) {
 static void StartJob(void) {
     g_cancel = 0; g_done = 0; g_total = 0; g_indet = 0;
     g_summary[0] = 0;
+    if (g_op == OP_DIAG || g_op == OP_CSD) { g_vd.valid = FALSE; g_showLog = TRUE; g_resView = TRUE; Relayout(); }
     SetBusy(TRUE);
     SetDlgItemTextW(g_hwnd, ID_STATUS, L"Iniciando...");
     g_t0 = GetTickCount64();
@@ -1639,6 +2799,10 @@ static void OnStart(void) {
     DiskInfo *s = FindDisk(SelectedDisk(ID_COMBO1));
     DiskInfo *t = FindDisk(SelectedDisk(ID_COMBO2));
     BOOL c1 = Checked(ID_CHK1), c2 = Checked(ID_CHK2);
+    BOOL imgSrc = (g_op == OP_RECOVER && RecoverMode() == RM_CARVE && c1);
+    BOOL ard = (g_op == OP_CSD && Checked(ID_RADB));
+    static DiskInfo noDisk;
+    if (!s && (imgSrc || ard)) { memset(&noDisk, 0, sizeof noDisk); noDisk.index = -1; s = &noDisk; }
     if (!s) { Warn(L"Selecione um cartão. Se ele não aparece, insira-o e clique em Atualizar."); return; }
     if (s->index == g_sysDisk) { Warn(L"Esse é o disco do sistema. Operação recusada."); return; }
     j->src = s->index; j->srcSize = s->size; j->srcSec = s->sec; j->di = *s;
@@ -1670,7 +2834,7 @@ static void OnStart(void) {
         if (t->index == s->index) { Warn(L"Origem e destino são o mesmo cartão."); return; }
         j->mode = c2 ? 1 : 0;
         if (t->size < s->size && !j->mode) {
-            Warn(L"O cartão de destino é MENOR que o de origem.\n\nSe os DADOS cabem no destino, marque a opção \"Copiar só os dados (o destino pode ser MENOR que a origem)\" e tente de novo.");
+            Warn(L"O cartão de destino é MENOR que o de origem.\n\nUse um cartão de destino do mesmo tamanho ou maior.");
             return;
         }
         _snwprintf(msg, 1799, L"Copiar:\n%ls\n\npara:\n%ls\n\nTODO O CONTEÚDO DO DESTINO SERÁ APAGADO. Continuar?", s->label, t->label);
@@ -1695,9 +2859,33 @@ static void OnStart(void) {
             CreateDirectoryW(path, NULL);
             DWORD at = GetFileAttributesW(path);
             if (at == INVALID_FILE_ATTRIBUTES || !(at & FILE_ATTRIBUTE_DIRECTORY)) { Warn(L"Não foi possível usar essa pasta."); return; }
+            if (imgSrc) {
+                OPENFILENAMEW ofn;
+                memset(&ofn, 0, sizeof ofn);
+                ofn.lStructSize = sizeof ofn;
+                ofn.hwndOwner = g_hwnd;
+                ofn.lpstrFile = j->img;
+                ofn.nMaxFile = MAX_PATH;
+                ofn.lpstrTitle = L"Escolha o arquivo de imagem do cartão";
+                ofn.lpstrFilter = L"Imagens de disco (*.img;*.bin;*.raw;*.dd)\0*.img;*.bin;*.raw;*.dd\0Todos os arquivos (*.*)\0*.*\0";
+                ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+                if (!GetOpenFileNameW(&ofn)) return;
+            }
         } else if (j->mode == RM_RESTORE) {
             _snwprintf(msg, 1799, L"Restaurar o cartão:\n%ls\n\nTODAS AS PARTIÇÕES E DADOS SERÃO APAGADOS e o cartão será formatado.\n\nCartões de consoles (R36S e similares) perdem o sistema e precisarão de uma nova gravação da imagem (função Imagem → Cartão).\n\nObs.: se o diagnóstico mostrou que o PRÓPRIO CARTÃO informa capacidade pequena, esta função não resolve. Continuar?", s->label);
             if (!Confirm(msg)) return;
+        }
+        break;
+    case OP_CSD:
+        j->cls = ard ? 1 : 0;
+        j->mode = (ard && c1) ? 1 : 0;
+        j->verify = ard && c2;
+        if (ard) {
+            int i = (int)SendMessageW(Ctl(ID_COMBOP), CB_GETCURSEL, 0, 0);
+            int k = i < 0 ? -1 : (int)SendMessageW(Ctl(ID_COMBOP), CB_GETITEMDATA, i, 0);
+            if (k < 0 || k >= g_nports) { Warn(L"Nenhuma porta escolhida. Conecte o Arduino e clique em Detectar."); return; }
+            wcsncpy(j->file, g_ports[k].port, MAX_PATH - 1);
+            if (j->mode && !Confirm(L"Se a proteção temporária estiver ligada, o app vai regravar o registro CSD do cartão para desligá-la.\n\nO bit de proteção permanente nunca é alterado. Continuar?")) return;
         }
         break;
     case OP_AUTH:
@@ -1760,6 +2948,7 @@ static void OnDone(BOOL ok) {
     SetDlgItemTextW(g_hwnd, ID_STATUS, ok ? L"Concluído." : L"Não concluído — veja o registro abaixo.");
     SetBusy(FALSE);
     RefreshDisks();
+    if (g_job.op == OP_DIAG || g_job.op == OP_CSD) { g_showLog = !g_vd.valid; ShowArea(); }
     FlashWindow(g_hwnd, TRUE);
     if (g_summary[0]) MessageBoxW(g_hwnd, g_summary, APP_TITLE, MB_OK | g_summaryIcon);
     if (g_openBrowse) {
@@ -1769,76 +2958,120 @@ static void OnDone(BOOL ok) {
 }
 
 static HWND mk(const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int w, int h, int id, DWORD ex) {
-    return CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, S(x), S(y + HDR), S(w), S(h), g_hwnd, (HMENU)(INT_PTR)id, g_inst, NULL);
+    return CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, S(x), S(y), S(w), S(h), g_hwnd, (HMENU)(INT_PTR)id, g_inst, NULL);
 }
 
 static BOOL CALLBACK SetFontCb(HWND h, LPARAM f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); return TRUE; }
 
+static int CALLBACK FontEnumCb(const LOGFONTW *lf, const TEXTMETRICW *tm, DWORD type, LPARAM l) {
+    (void)lf; (void)tm; (void)type;
+    *(BOOL *)l = TRUE;
+    return 0;
+}
+static BOOL FontExists(const wchar_t *face) {
+    LOGFONTW lf;
+    memset(&lf, 0, sizeof lf);
+    lf.lfCharSet = DEFAULT_CHARSET;
+    wcsncpy(lf.lfFaceName, face, LF_FACESIZE - 1);
+    BOOL found = FALSE;
+    HDC dc = GetDC(NULL);
+    EnumFontFamiliesExW(dc, &lf, FontEnumCb, (LPARAM)&found, 0);
+    ReleaseDC(NULL, dc);
+    return found;
+}
+static HFONT MkFont(int px, int weight, const wchar_t *face) {
+    return CreateFontW(-S(px), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, face);
+}
+
 static void CreateUi(void) {
-    static const wchar_t *ops[] = {L"Cartão → Imagem", L"Imagem → Cartão", L"Cartão → Cartão", L"Verificar cartão", L"Recuperar cartão", L"Autenticidade"};
-    NONCLIENTMETRICSW ncm;
-    memset(&ncm, 0, sizeof ncm);
-    ncm.cbSize = sizeof ncm;
-    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0);
-    g_font = CreateFontIndirectW(&ncm.lfMessageFont);
-    LOGFONTW lf = ncm.lfMessageFont;
-    lf.lfWeight = FW_SEMIBOLD;
-    g_fontB = CreateFontIndirectW(&lf);
-    lf = ncm.lfMessageFont;
-    wcscpy(lf.lfFaceName, L"Consolas");
-    g_fontMono = CreateFontIndirectW(&lf);
-    g_fontTitle = CreateFontW(-S(24), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-    g_fontSmall = CreateFontW(-S(12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    const wchar_t *text = FontExists(L"Segoe UI Variable Text") ? L"Segoe UI Variable Text" : L"Segoe UI";
+    const wchar_t *disp = FontExists(L"Segoe UI Variable Display") ? L"Segoe UI Variable Display" : L"Segoe UI";
+    const wchar_t *icon = FontExists(L"Segoe Fluent Icons") ? L"Segoe Fluent Icons" : (FontExists(L"Segoe MDL2 Assets") ? L"Segoe MDL2 Assets" : NULL);
+    g_font = MkFont(14, FW_NORMAL, text);
+    g_fontB = MkFont(14, FW_SEMIBOLD, text);
+    g_fontVal = MkFont(13, FW_NORMAL, text);
+    g_fontValB = MkFont(13, FW_SEMIBOLD, text);
+    g_fontSmall = MkFont(12, FW_NORMAL, text);
+    g_fontH = MkFont(20, FW_SEMIBOLD, disp);
+    g_fontTitle = MkFont(28, FW_SEMIBOLD, disp);
+    g_fontMono = MkFont(13, FW_NORMAL, L"Consolas");
+    if (icon) {
+        g_fontIcon = MkFont(16, FW_NORMAL, icon);
+        g_fontIconM = MkFont(20, FW_NORMAL, icon);
+        g_fontIconL = MkFont(28, FW_NORMAL, icon);
+    }
     g_brBg = CreateSolidBrush(CL_BG);
+    g_brCard = CreateSolidBrush(CL_PANEL);
     g_brInput = CreateSolidBrush(CL_INPUT);
     g_brLog = CreateSolidBrush(CL_LOG);
 
-    CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_OWNERDRAW, 0, 0, S(640), S(HDR), g_hwnd, (HMENU)(INT_PTR)ID_HEADER, g_inst, NULL);
-    for (int i = 0; i < 6; i++)
-        mk(L"BUTTON", ops[i], BS_OWNERDRAW | WS_TABSTOP, 10 + i * 103, 10, 101, 40, ID_OP0 + i, 0);
-    mk(L"STATIC", L"", SS_LEFT, 10, 56, 620, 34, ID_DESC, 0);
-    mk(L"STATIC", L"Cartão:", SS_LEFT, 10, 94, 360, 18, ID_LBL1, 0);
-    mk(L"BUTTON", L"Mostrar todos os discos (cuidado)", BS_OWNERDRAW | WS_TABSTOP, 380, 92, 250, 20, ID_SHOWALL, 0);
+    /* navegação */
+    mk(L"STATIC", L"", SS_OWNERDRAW | WS_CLIPSIBLINGS, 0, 0, NAV_W, WIN_H, ID_HEADER, 0);
+    for (int i = 0; i < OP_COUNT; i++)
+        mk(L"BUTTON", NAV_T[NAV_ORDER[i]], BS_OWNERDRAW | WS_TABSTOP, 8, NavY(i), NAV_W - 16, 36, ID_OP0 + NAV_ORDER[i], 0);
+
+    /* título da página */
+    mk(L"STATIC", L"", SS_LEFT | SS_NOPREFIX, MX, 18, MW, 40, ID_TITLE, 0);
+
+    /* cartão do dispositivo e campos da tarefa (posições finais vêm de Relayout) */
+    mk(L"STATIC", L"Cartão", SS_LEFT | SS_NOPREFIX, 0, 0, 100, 18, ID_LBL1, 0);
+    mk(L"BUTTON", L"Mostrar todos os discos", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 100, 22, ID_SHOWALL, 0);
     DWORD cb = CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP;
-    mk(L"COMBOBOX", L"", cb, 10, 114, 520, 240, ID_COMBO1, 0);
-    mk(L"BUTTON", L"Atualizar", BS_OWNERDRAW | WS_TABSTOP, 540, 113, 90, 26, ID_REFRESH, 0);
-    mk(L"STATIC", L"", SS_LEFT, 10, 148, 620, 18, ID_LBL2, 0);
-    mk(L"COMBOBOX", L"", cb, 10, 168, 520, 240, ID_COMBO2, 0);
-    mk(L"COMBOBOX", L"", cb, 10, 168, 300, 240, ID_COMBOB, 0);
-    mk(L"COMBOBOX", L"", cb, 320, 168, 210, 240, ID_COMBOC, 0);
-    mk(L"STATIC", L"", SS_LEFT, 10, 202, 620, 18, ID_LBLFILE, 0);
-    HWND ed = mk(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, 10, 222, 520, 24, ID_EDITFILE, 0);
-    SendMessageW(ed, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(S(6), S(6)));
-    mk(L"BUTTON", L"Procurar...", BS_OWNERDRAW | WS_TABSTOP, 540, 221, 90, 26, ID_BROWSE, 0);
-    mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 10, 256, 620, 20, ID_CHK1, 0);
-    mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 10, 280, 620, 20, ID_CHK2, 0);
-    mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 10, 256, 620, 20, ID_RADA, 0);
-    mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 10, 280, 620, 20, ID_RADB, 0);
-    mk(L"BUTTON", L"Iniciar", BS_OWNERDRAW | WS_TABSTOP, 10, 314, 200, 38, ID_START, 0);
-    mk(L"BUTTON", L"Cancelar", BS_OWNERDRAW | WS_TABSTOP | WS_DISABLED, 220, 314, 120, 38, ID_CANCELBTN, 0);
-    HWND pb = mk(PROGRESS_CLASSW, L"", 0, 10, 364, 620, 22, ID_PROGRESS, 0);
+    mk(L"COMBOBOX", L"", cb, 0, 0, 100, 300, ID_COMBO1, 0);
+    mk(L"BUTTON", L"Atualizar", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 32, 32, ID_REFRESH, 0);
+    mk(L"STATIC", L"", SS_LEFT | SS_NOPREFIX, 0, 0, 100, 40, ID_DESC, 0);
+    mk(L"STATIC", L"", SS_LEFT | SS_NOPREFIX, 0, 0, 100, 20, ID_LBL2, 0);
+    mk(L"COMBOBOX", L"", cb, 0, 0, 100, 300, ID_COMBO2, 0);
+    mk(L"COMBOBOX", L"", cb, 0, 0, 100, 300, ID_COMBOB, 0);
+    mk(L"COMBOBOX", L"", cb, 0, 0, 100, 300, ID_COMBOC, 0);
+    mk(L"COMBOBOX", L"", cb, 0, 0, 100, 300, ID_COMBOP, 0);
+    mk(L"BUTTON", L"Detectar", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 100, 32, ID_DETECT, 0);
+    mk(L"STATIC", L"", SS_LEFT | SS_NOPREFIX, 0, 0, 100, 20, ID_LBLFILE, 0);
+    HWND ed = mk(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER, 0, 0, 100, 32, ID_EDITFILE, 0);
+    SendMessageW(ed, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(S(8), S(8)));
+    mk(L"BUTTON", L"Procurar...", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 100, 32, ID_BROWSE, 0);
+    mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 100, 24, ID_CHK1, 0);
+    mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 100, 24, ID_CHK2, 0);
+    mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 100, 24, ID_RADA, 0);
+    mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 100, 24, ID_RADB, 0);
+    mk(L"STATIC", L"", SS_OWNERDRAW, 0, 0, 100, 40, ID_WARN, 0);
+
+    /* ações, progresso, resultado e registro */
+    mk(L"BUTTON", L"Iniciar", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 180, 32, ID_START, 0);
+    mk(L"BUTTON", L"Cancelar", BS_OWNERDRAW | WS_TABSTOP | WS_DISABLED, 0, 0, 110, 32, ID_CANCELBTN, 0);
+    mk(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 200, 32, ID_NEXT, 0);
+    mk(L"BUTTON", L"Ver registro técnico", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 170, 32, ID_LOGBTN, 0);
+    mk(L"BUTTON", L"Alterar opções", BS_OWNERDRAW | WS_TABSTOP, 0, 0, 150, 32, ID_OPTS, 0);
+    HWND pb = mk(PROGRESS_CLASSW, L"", 0, 0, 0, MW, 4, ID_PROGRESS, 0);
     SendMessageW(pb, PBM_SETRANGE32, 0, 1000);
-    mk(L"STATIC", L"Pronto. Confira sempre o disco selecionado antes de gravar.", SS_LEFT | SS_ENDELLIPSIS, 10, 390, 620, 20, ID_STATUS, 0);
-    HWND lg = mk(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP, 10, 416, 620, 150, ID_LOG, 0);
+    mk(L"STATIC", L"Pronto. Confira sempre o cartão selecionado antes de gravar.", SS_LEFT | SS_ENDELLIPSIS | SS_NOPREFIX, 0, 0, MW, 18, ID_STATUS, 0);
+    mk(L"STATIC", L"", SS_OWNERDRAW, 0, 0, MW, 200, ID_RESULT, 0);
+    HWND lg = mk(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP, 0, 0, MW, 200, ID_LOG, 0);
     SendMessageW(lg, EM_LIMITTEXT, 0x7FFFFFFE, 0);
-    SendMessageW(lg, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(S(6), S(6)));
+    SendMessageW(lg, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(S(4), S(4)));
     for (int i = 0; i < NBRANDS; i++) SendMessageW(Ctl(ID_COMBOB), CB_ADDSTRING, 0, (LPARAM)BRANDS[i].name);
     for (int i = 0; i < NCLASSES; i++) SendMessageW(Ctl(ID_COMBOC), CB_ADDSTRING, 0, (LPARAM)CLASSES[i].name);
     SendMessageW(Ctl(ID_COMBOB), CB_SETCURSEL, 0, 0);
     SendMessageW(Ctl(ID_COMBOC), CB_SETCURSEL, 0, 0);
     EnumChildWindows(g_hwnd, SetFontCb, (LPARAM)g_font);
     SendMessageW(lg, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
-    /* tema escuro nos controles que continuam nativos (combos, edit, barra de rolagem, progresso) */
-    SetTheme(Ctl(ID_COMBO1), L"DarkMode_CFD", NULL);
-    SetTheme(Ctl(ID_COMBO2), L"DarkMode_CFD", NULL);
-    SetTheme(Ctl(ID_COMBOB), L"DarkMode_CFD", NULL);
-    SetTheme(Ctl(ID_COMBOC), L"DarkMode_CFD", NULL);
-    SetTheme(ed, L"DarkMode_CFD", NULL);
-    SetTheme(lg, L"DarkMode_Explorer", NULL);
+    SendMessageW(Ctl(ID_TITLE), WM_SETFONT, (WPARAM)g_fontTitle, TRUE);
+    SendMessageW(Ctl(ID_LBL1), WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
+    SendMessageW(Ctl(ID_STATUS), WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
+    /* controles nativos: tema escuro só quando o Windows está no modo escuro */
+    const wchar_t *cfd = g_dark ? L"DarkMode_CFD" : NULL;
+    SetTheme(Ctl(ID_COMBO1), cfd, NULL);
+    SetTheme(Ctl(ID_COMBO2), cfd, NULL);
+    SetTheme(Ctl(ID_COMBOB), cfd, NULL);
+    SetTheme(Ctl(ID_COMBOC), cfd, NULL);
+    SetTheme(Ctl(ID_COMBOP), cfd, NULL);
+    SetTheme(ed, cfd, NULL);
+    SetTheme(lg, g_dark ? L"DarkMode_Explorer" : L"Explorer", NULL);
     SetTheme(pb, L"", L"");
-    SendMessageW(pb, 0x2001 /* PBM_SETBKCOLOR */, 0, (LPARAM)CL_INPUT);
+    SendMessageW(pb, 0x2001 /* PBM_SETBKCOLOR */, 0, (LPARAM)g_pal.btnEdge);
     SendMessageW(pb, 0x0409 /* PBM_SETBARCOLOR */, 0, (LPARAM)CL_NEON);
-    static const int bids[] = {ID_OP0, ID_OP0 + 1, ID_OP0 + 2, ID_OP0 + 3, ID_OP0 + 4, ID_OP0 + 5, ID_REFRESH, ID_SHOWALL, ID_BROWSE, ID_CHK1, ID_CHK2, ID_RADA, ID_RADB, ID_START, ID_CANCELBTN};
+    static const int bids[] = {ID_OP0, ID_OP0 + 1, ID_OP0 + 2, ID_OP0 + 3, ID_OP0 + 4, ID_OP0 + 5, ID_OP0 + 6, ID_OP0 + 7, ID_DETECT,
+                               ID_REFRESH, ID_SHOWALL, ID_BROWSE, ID_CHK1, ID_CHK2, ID_RADA, ID_RADB, ID_START, ID_CANCELBTN, ID_NEXT, ID_LOGBTN, ID_OPTS};
     for (int i = 0; i < (int)(sizeof bids / sizeof bids[0]); i++) SetWindowSubclass(Ctl(bids[i]), BtnSub, bids[i], 0);
 }
 
@@ -1848,12 +3081,12 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         g_hwnd = h;
         CreateUi();
         RefreshDisks();
-        ApplyOp(0);
-        Log(L"Pronto. Insira o cartão e escolha a função acima. Execute sempre como administrador.");
+        ApplyOp(OP_DIAG);
+        Log(L"Pronto. Escolha o cartão e a tarefa no menu à esquerda.");
         return 0;
     case WM_COMMAND: {
         int id = LOWORD(w), code = HIWORD(w);
-        if (id >= ID_OP0 && id <= ID_OP0 + 5 && code == BN_CLICKED) { if (!g_busy) ApplyOp(id - ID_OP0); }
+        if (id >= ID_OP0 && id < ID_OP0 + OP_COUNT && code == BN_CLICKED) { if (!g_busy) ApplyOp(id - ID_OP0); }
         else if (id == ID_REFRESH && code == BN_CLICKED) { if (!g_busy) RefreshDisks(); }
         else if (id == ID_SHOWALL && code == BN_CLICKED) { if (!g_busy) { SetChk(ID_SHOWALL, !Checked(ID_SHOWALL)); RefreshDisks(); } }
         else if (id == ID_BROWSE && code == BN_CLICKED) OnBrowse();
@@ -1864,6 +3097,18 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             UpdateEnable();
         }
         else if (id == ID_START && code == BN_CLICKED) OnStart();
+        else if (id == ID_NEXT && code == BN_CLICKED) { if (!g_busy) OnNext(); }
+        else if (id == ID_LOGBTN && code == BN_CLICKED) { g_showLog = !g_showLog; ShowArea(); }
+        else if (id == ID_OPTS && code == BN_CLICKED) { if (!g_busy) ApplyOp(g_op); }
+        else if (id == ID_DETECT && code == BN_CLICKED) {
+            if (!g_busy) {
+                FillPorts();
+                int lk = 0;
+                for (int i = 0; i < g_nports; i++) lk += g_ports[i].likely;
+                if (g_nports == 0) Warn(L"Nenhuma porta serial encontrada.\n\nConecte o Arduino ou ESP32 pelo cabo USB (cabo de dados, não só de carga) e instale o driver da placa (CH340 ou CP210x, se for um clone).");
+                else SetDlgItemTextW(h, ID_STATUS, lk ? L"Arduino/ESP32 detectado. Confira a porta e clique em Ler proteção." : L"Portas encontradas, mas nenhuma parece ser um Arduino/ESP32. Escolha a porta manualmente.");
+            }
+        }
         else if (id == ID_CANCELBTN && code == BN_CLICKED) {
             if (g_busy) { g_cancel = 1; SetDlgItemTextW(h, ID_STATUS, L"Cancelando..."); }
         }
@@ -1874,15 +3119,20 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         RECT rc;
         GetClientRect(h, &rc);
         Fill(dc, rc, CL_BG);
-        static const int fr[] = {ID_COMBO1, ID_COMBO2, ID_COMBOB, ID_COMBOC, ID_EDITFILE, ID_LOG};
-        for (int i = 0; i < 6; i++) {
-            HWND c = Ctl(fr[i]);
-            if (!c || !(GetWindowLongW(c, GWL_STYLE) & WS_VISIBLE)) continue;
-            RECT r;
-            GetWindowRect(c, &r);
-            MapWindowPoints(NULL, h, (POINT *)&r, 2);
-            InflateRect(&r, 1, 1);
-            Frame(dc, r, fr[i] == ID_LOG ? CL_NEON2 : CL_EDGE);
+        /* cartão do dispositivo */
+        RECT dv = {S(MX), S(DEV_Y), S(MX + MW), S(DEV_Y + DEV_H)};
+        RRect(dc, dv, S(6), CL_PANEL, CL_EDGE);
+        RECT gi = {S(MX + 12), S(DEV_Y), S(MX + 48), S(DEV_Y + DEV_H)};
+        if (g_fontIconL) Glyph(dc, 0xE7F1, &gi, CL_NEON, g_fontIconL);
+        /* cartão da tarefa */
+        if (g_cardBot > TASK_Y) {
+            RECT tk = {S(MX), S(TASK_Y), S(MX + MW), S(g_cardBot)};
+            RRect(dc, tk, S(6), CL_PANEL, CL_EDGE);
+        }
+        /* moldura do registro */
+        if (CtlVisible(ID_LOG)) {
+            RECT lr = {S(MX), S(g_areaTop), S(MX + MW), rc.bottom - S(16)};
+            RRect(dc, lr, S(6), CL_LOG, CL_EDGE);
         }
         return 1;
     }
@@ -1890,12 +3140,16 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         DRAWITEMSTRUCT *d = (DRAWITEMSTRUCT *)l;
         if (d->CtlType == ODT_BUTTON) DrawButton(d);
         else if (d->CtlType == ODT_COMBOBOX) DrawCombo(d);
-        else if (d->CtlType == ODT_STATIC) DrawHeader(d);
+        else if (d->CtlType == ODT_STATIC) {
+            if (d->CtlID == ID_HEADER) DrawSidebar(d);
+            else if (d->CtlID == ID_WARN) DrawWarn(d);
+            else if (d->CtlID == ID_RESULT) DrawResult(d);
+        }
         return TRUE;
     }
     case WM_MEASUREITEM: {
         MEASUREITEMSTRUCT *mi = (MEASUREITEMSTRUCT *)l;
-        if (mi->CtlType == ODT_COMBOBOX) { mi->itemHeight = S(20); return TRUE; }
+        if (mi->CtlType == ODT_COMBOBOX) { mi->itemHeight = S(26); return TRUE; }
         break;
     }
     case WM_CTLCOLOREDIT:
@@ -1907,17 +3161,21 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (m == WM_CTLCOLORLISTBOX) { SetTextColor(dc, CL_TXT); SetBkColor(dc, CL_INPUT); return (LRESULT)g_brInput; }
         if (id == ID_LOG) { SetTextColor(dc, CL_LOGTXT); SetBkColor(dc, CL_LOG); return (LRESULT)g_brLog; }
         if (id == ID_EDITFILE) { SetTextColor(dc, IsWindowEnabled(c) ? CL_TXT : CL_DIM); SetBkColor(dc, CL_INPUT); return (LRESULT)g_brInput; }
-        COLORREF tc = CL_TXT;
-        if (id == ID_STATUS) tc = RGB(110, 225, 255);
-        else if (id == ID_DESC) tc = RGB(150, 170, 205);
-        else if (id == ID_LBLFILE && !g_fileOn) tc = CL_DIM;
+        COLORREF tc = CL_TXT, bk = CL_BG;
+        HBRUSH br = g_brBg;
+        if (id == ID_LBL1 || id == ID_LBL2 || id == ID_LBLFILE || id == ID_DESC) {
+            bk = CL_PANEL;
+            br = g_brCard;
+            if (id == ID_LBL1 || id == ID_DESC) tc = CL_DIM;
+            else if (id == ID_LBLFILE && !g_fileOn) tc = CL_DIM;
+        } else if (id == ID_STATUS) tc = CL_DIM;
         SetTextColor(dc, tc);
-        SetBkColor(dc, CL_BG);
-        return (LRESULT)g_brBg;
+        SetBkColor(dc, bk);
+        return (LRESULT)br;
     }
     case WM_TIMER:
         if (w == 1) UpdateProgress();
-        else if (w == 2) { KillTimer(h, 2); if (!g_busy) RefreshDisks(); }
+        else if (w == 2) { KillTimer(h, 2); if (!g_busy) { RefreshDisks(); if (g_op == OP_CSD) FillPorts(); } }
         return 0;
     case WM_DEVICECHANGE:
         if (!g_busy && (w == DBT_DEVNODES_CHANGED)) SetTimer(h, 2, 1200, NULL);
@@ -1954,9 +3212,16 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show) {
     INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS | ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&icc);
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    LoadPalette();
+    GpInit();
     HDC dc = GetDC(NULL);
     g_dpi = GetDeviceCaps(dc, LOGPIXELSX);
     ReleaseDC(NULL, dc);
+    if (g_dpi < 96) g_dpi = 96;
+    /* em telas pequenas com zoom alto, reduz a escala para a janela caber inteira */
+    RECT wa;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    while (g_dpi > 96 && (MulDiv(WIN_H + 40, g_dpi, 96) > wa.bottom - wa.top || MulDiv(WIN_W + 16, g_dpi, 96) > wa.right - wa.left)) g_dpi -= 4;
     if (g_dpi < 96) g_dpi = 96;
     WNDCLASSEXW wc;
     memset(&wc, 0, sizeof wc);
@@ -1970,12 +3235,13 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show) {
     wc.hIconSm = wc.hIcon;
     RegisterClassExW(&wc);
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-    RECT rc = {0, 0, S(640), S(616)};
+    RECT rc = {0, 0, S(WIN_W), S(WIN_H)};
     AdjustWindowRect(&rc, style, FALSE);
     int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
-    int sx = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
-    if (sy < 0) sy = 0;
-    HWND hw = CreateWindowExW(0, L"SDCloneWnd", L"SDCLONETOOLS — copiar, gravar, verificar, autenticar e reparar cartões SD", style, sx, sy, ww, wh, NULL, NULL, hi, NULL);
+    int sx = wa.left + (wa.right - wa.left - ww) / 2, sy = wa.top + (wa.bottom - wa.top - wh) / 2;
+    if (sy < wa.top) sy = wa.top;
+    if (sx < wa.left) sx = wa.left;
+    HWND hw = CreateWindowExW(0, L"SDCloneWnd", L"SD Clone Tools", style, sx, sy, ww, wh, NULL, NULL, hi, NULL);
     if (!hw) return 1;
     DarkTitlebar(hw);
     ShowWindow(hw, show);
@@ -1987,6 +3253,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show) {
             DispatchMessageW(&msg);
         }
     }
+    GpDone();
     CoUninitialize();
     return (int)msg.wParam;
 }

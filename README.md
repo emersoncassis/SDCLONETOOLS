@@ -12,25 +12,51 @@ Quem monta, grava e conserta esses aparelhos (R36S e clones, M17, gamesticks e s
 
 Arquivo único, sem instalação. Execute e aceite o pedido de administrador.
 
+## Telas
+
+O menu à esquerda tem as funções; a área à direita mostra a tarefa e, no fim, o resultado.
+
+**Proteção do cartão**: dois modos separados, leitor interno do computador ou Arduino/ESP32.
+
+![Proteção do cartão](docs/img/protecao.png)
+
+**Diagnóstico**: o resultado vem como veredito (causa provável, se tem conserto, se dá para salvar os dados e o que fazer) e um mapa de leitura de 128 pontos do cartão.
+
+![Veredito do Diagnóstico](docs/img/diagnostico-veredito.png)
+
 ## O que faz
 
 | Função | Para que serve |
 |---|---|
-| **Cartão → Imagem** | Backup exato do cartão em um arquivo `.img` |
-| **Imagem → Cartão** | Grava a imagem do sistema (`.img`, `.iso`, `.bin`) no cartão, com verificação |
-| **Cartão → Cartão** | Clona um cartão direto em outro; com "copiar só os dados", o destino pode até ser **menor** que a origem, se os dados couberem |
-| **Verificar cartão** | Procura setores ruins, compara com uma imagem e testa a capacidade real |
-| **Recuperar cartão** | **Repara cartão sem acesso ou com capacidade errada**: diagnostica e explica o problema, mostra e copia arquivos de partições que o Windows não vê (ext4 de consoles), reconstrói partições perdidas sem apagar dados, recupera arquivos apagados e restaura o cartão |
+| **Diagnóstico** | Analisa o cartão sem apagar nada: tabela de partições, leitura em 128 pontos, teste opcional de gravação (grava 4 KB em 2 pontos e devolve o conteúdo original) e leitura do registro CID. Termina com um veredito claro: causa provável, se o cartão tem conserto, se dá para salvar os dados e o que fazer agora |
+| **Proteção do cartão** | Lê os bits de proteção contra gravação (CSD) e o bloqueio por senha, para saber se o cartão está travado por proteção ou pelo firmware. Tem dois modos, descritos abaixo |
+| **Recuperar e reparar** | Análise de partições, ver e copiar arquivos (inclusive ext4 de consoles), reconstruir partições perdidas sem apagar dados, procurar arquivos apagados (de uma imagem ou do cartão) e restaurar o cartão |
 | **Autenticidade** | Descobre se o cartão é verdadeiro ou falso: marca, fabricante registrado, capacidade real e velocidade |
+| **Verificar setores** | Leitura completa, comparação com uma imagem e teste de capacidade real |
+| **Fazer backup** | Cartão para arquivo `.img`, com conferência opcional |
+| **Gravar imagem** | Grava `.img`, `.iso` ou `.bin` no cartão, com verificação |
+| **Clonar cartão** | Copia um cartão direto para outro |
+
+### Proteção do cartão: dois modos
+
+| | Leitor interno do computador | Arduino ou ESP32 por USB |
+|---|---|---|
+| Serve para | Slot de cartão SD do notebook/PC | Qualquer cartão micro SD, com um módulo de ~R$ 10 |
+| Leitor USB | Não funciona (leitores USB não repassam comandos ao cartão) | Não depende do leitor do PC |
+| O que faz | Só lê o CID, o CSD e o estado de bloqueio | Lê os registros, testa gravação direto no cartão e pode desligar a proteção **temporária** |
+| Instalação | Nenhuma | Gravar o programa em [`arduino/`](arduino/LEIA.md) na placa |
+
+No modo Arduino, o app lista as portas USB, marca as que parecem Arduino ou ESP32 e confirma que a placa tem o programa do SD Clone Tools antes de começar. O resultado diz se o bloqueio é proteção temporária, proteção permanente, senha ou **firmware travado em somente leitura** (o cartão recusa gravar mesmo sem nenhum bit ligado; não há conserto por software, só salvar os dados). Se o cartão grava normalmente direto no Arduino, o defeito está no leitor ou adaptador do computador. A ligação dos fios e o passo a passo estão em [arduino/LEIA.md](arduino/LEIA.md).
 
 ### Cartão de 128 GB aparecendo com poucos MB? Cartão "sem acesso"?
 
-Use **Recuperar cartão → Diagnosticar**. O app lê o cartão sem alterar nada e diz qual é o caso:
+Use **Diagnóstico**, depois **Recuperar e reparar**. O app lê o cartão sem alterar nada e diz qual é o caso:
 
 - **o próprio cartão informa pouca capacidade** (controlador com defeito ou cartão falso): não é partição, não tem conserto por software comum, e o app explica isso;
 - **partições cobrindo só parte do cartão** (imagem pequena gravada em cartão grande): os dados estão intactos e o espaço pode ser recuperado;
 - **partições Linux que o Windows não lê** (normal em R36S, ArkOS, JELOS): o app abre e copia esses arquivos;
-- **tabela de partições apagada** (cartão "RAW"): o app encontra as partições e reconstrói a tabela sem apagar nada.
+- **tabela de partições apagada** (cartão "RAW"): o app encontra as partições e reconstrói a tabela sem apagar nada;
+- **cartão que não aceita gravação** (erro de E/S 1117 ao formatar): firmware em modo somente leitura, comum em cartão desgastado. Leitura ainda funciona, então o app orienta a fazer o backup primeiro.
 
 ### Por que a Autenticidade importa
 
@@ -81,6 +107,7 @@ O segundo precisa de `dosfstools mtools exfatprogs exfat-fuse e2fsprogs fdisk`.
 | Arquivo | Conteúdo |
 |---|---|
 | `sdclone.c` | Interface Win32 e operações de disco |
+| `arduino/` | Programa para Arduino/ESP32 e guia de ligação (modo Arduino da Proteção do cartão) |
 | `core.h` | Motor de recuperação, padrão do teste de capacidade e tabela de fabricantes |
 | `fsread.h` | Leitura somente leitura de FAT12/16/32, exFAT e ext2/3/4 |
 | `diag.h` | Diagnóstico de MBR/GPT, partições perdidas e reconstrução do MBR |
