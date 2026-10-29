@@ -28,7 +28,7 @@ enum {
     ID_OP0 = 100, /* 100..107 */
     ID_DESC = 120, ID_LBL1, ID_COMBO1, ID_REFRESH, ID_SHOWALL, ID_LBL2, ID_COMBO2, ID_COMBOB, ID_COMBOC,
     ID_LBLFILE, ID_EDITFILE, ID_BROWSE, ID_CHK1, ID_CHK2, ID_RADA, ID_RADB,
-    ID_START, ID_CANCELBTN, ID_PROGRESS, ID_STATUS, ID_LOG, ID_HEADER, ID_TITLE, ID_WARN, ID_RESULT, ID_NEXT, ID_LOGBTN, ID_COMBOP, ID_DETECT, ID_OPTS,
+    ID_START, ID_CANCELBTN, ID_PROGRESS, ID_STATUS, ID_LOG, ID_HEADER, ID_TITLE, ID_WARN, ID_RESULT, ID_NEXT, ID_LOGBTN, ID_COMBOP, ID_DETECT, ID_OPTS, ID_EJECT,
     ID_BR_PART = 300, ID_BR_LBL, ID_BR_PATH, ID_BR_LIST, ID_BR_INFO, ID_BR_UP, ID_BR_COPYSEL, ID_BR_COPYALL, ID_BR_CANCEL, ID_BR_CLOSE
 };
 
@@ -411,6 +411,15 @@ static void DrawButton(DRAWITEMSTRUCT *d) {
         Glyph(dc, NAV_G[op], &ir, tc, g_fontIcon);
         RECT tr = {g_fontIcon ? S(46) : S(16), 0, w - S(8), h};
         Txt(dc, NAV_T[op], &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, tc, g_font);
+    } else if (id == ID_EJECT) {
+        /* item fixo no pé do menu */
+        if (hot || sel) RRect(dc, r, S(4), g_pal.navHot, CL_NONE);
+        else if (foc) RRect(dc, r, S(4), CL_NONE, g_pal.btnEdge);
+        COLORREF tc = dis ? CL_DIM : CL_TXT;
+        RECT ir = {S(12), 0, S(36), h};
+        Glyph(dc, 0xE88E, &ir, tc, g_fontIcon);
+        RECT tr = {g_fontIcon ? S(46) : S(16), 0, w - S(8), h};
+        Txt(dc, t, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, tc, g_font);
     } else if (id == ID_LOGBTN || id == ID_OPTS) {
         /* botão discreto, estilo link */
         if (hot || sel) RRect(dc, r, S(4), g_pal.navHot, CL_NONE);
@@ -455,6 +464,8 @@ static void DrawButton(DRAWITEMSTRUCT *d) {
         RECT tr = {bs + S(10), 0, w, h};
         Txt(dc, t, &tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX, dis ? CL_DIM : CL_TXT, g_font);
     }
+    RECT sp2 = {S(20), S(WIN_H - 62), w - S(20), S(WIN_H - 62) + 1};
+    Fill(dc, sp2, g_pal.btnEdge);
     BitBlt(d->hDC, d->rcItem.left, d->rcItem.top, w, h, dc, 0, 0, SRCCOPY);
     SelectObject(dc, ob);
     DeleteObject(bm);
@@ -915,6 +926,48 @@ static BOOL LockDiskVolumes(int disk, VolSet *vs) {
         vs->h[vs->n++] = h;
     }
     return TRUE;
+}
+
+/* remover com segurança: trava e desmonta os volumes do cartão e pede ao Windows para ejetar a mídia */
+static void DoEject(void) {
+    int n = SelectedDisk(ID_COMBO1);
+    if (n < 0) {
+        MessageBoxW(g_hwnd, L"Escolha o cartão na lista antes de removê-lo.", L"Remover com segurança", MB_ICONINFORMATION);
+        return;
+    }
+    DiskInfo *di = FindDisk(n);
+    wchar_t lt[64];
+    wcscpy(lt, di ? di->letters : L"");
+    HCURSOR oc = SetCursor(LoadCursor(NULL, IDC_WAIT));
+    VolSet vs;
+    BOOL ok = LockDiskVolumes(n, &vs);
+    BOOL ejected = FALSE;
+    if (ok) {
+        for (int i = 0; i < vs.n; i++) {
+            DWORD br;
+            PREVENT_MEDIA_REMOVAL pmr = {FALSE};
+            DeviceIoControl(vs.h[i], IOCTL_STORAGE_MEDIA_REMOVAL, &pmr, sizeof pmr, NULL, 0, &br, NULL);
+            if (DeviceIoControl(vs.h[i], IOCTL_STORAGE_EJECT_MEDIA, NULL, 0, NULL, 0, &br, NULL)) ejected = TRUE;
+        }
+        if (vs.n == 0) {
+            wchar_t p[40];
+            _snwprintf(p, 39, L"\\\\.\\PhysicalDrive%d", n);
+            HANDLE h = CreateFileW(p, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+            if (h != INVALID_HANDLE_VALUE) {
+                DWORD br;
+                if (DeviceIoControl(h, IOCTL_STORAGE_EJECT_MEDIA, NULL, 0, NULL, 0, &br, NULL)) ejected = TRUE;
+                CloseHandle(h);
+            }
+        }
+        UnlockVolumes(&vs);
+    }
+    SetCursor(oc);
+    if (!ok) {
+        MessageBoxW(g_hwnd, L"O cartão está em uso e não pôde ser liberado.\n\nFeche o Explorador de Arquivos e os programas que usam o cartão e tente de novo.", L"Remover com segurança", MB_ICONWARNING);
+        return;
+    }
+    RefreshDisks();
+    MessageBoxW(g_hwnd, ejected ? L"Pronto. Já pode tirar o cartão do leitor." : L"O Windows não está usando o cartão. Já pode tirá-lo do leitor.", L"Remover com segurança", MB_ICONINFORMATION);
 }
 
 static void UpdateDiskProps(HANDLE hd) {
@@ -2720,7 +2773,7 @@ static void SetBusy(BOOL b) {
     g_busy = b;
     for (int i = 0; i < OP_COUNT; i++) EnableCtl(ID_OP0 + i, !b);
     EnableCtl(ID_COMBO1, !b); EnableCtl(ID_COMBO2, !b); EnableCtl(ID_COMBOB, !b); EnableCtl(ID_COMBOC, !b);
-    EnableCtl(ID_REFRESH, !b); EnableCtl(ID_SHOWALL, !b);
+    EnableCtl(ID_REFRESH, !b); EnableCtl(ID_SHOWALL, !b); EnableCtl(ID_EJECT, !b);
     EnableCtl(ID_CHK1, !b); EnableCtl(ID_CHK2, !b); EnableCtl(ID_RADA, !b); EnableCtl(ID_RADB, !b);
     EnableCtl(ID_START, !b);
     EnableCtl(ID_CANCELBTN, b);
@@ -3009,6 +3062,7 @@ static void CreateUi(void) {
     mk(L"STATIC", L"", SS_OWNERDRAW | WS_CLIPSIBLINGS, 0, 0, NAV_W, WIN_H, ID_HEADER, 0);
     for (int i = 0; i < OP_COUNT; i++)
         mk(L"BUTTON", NAV_T[NAV_ORDER[i]], BS_OWNERDRAW | WS_TABSTOP, 8, NavY(i), NAV_W - 16, 36, ID_OP0 + NAV_ORDER[i], 0);
+    mk(L"BUTTON", L"Remover com segurança", BS_OWNERDRAW | WS_TABSTOP, 8, WIN_H - 52, NAV_W - 16, 36, ID_EJECT, 0);
 
     /* título da página */
     mk(L"STATIC", L"", SS_LEFT | SS_NOPREFIX, MX, 18, MW, 40, ID_TITLE, 0);
@@ -3071,7 +3125,7 @@ static void CreateUi(void) {
     SendMessageW(pb, 0x2001 /* PBM_SETBKCOLOR */, 0, (LPARAM)g_pal.btnEdge);
     SendMessageW(pb, 0x0409 /* PBM_SETBARCOLOR */, 0, (LPARAM)CL_NEON);
     static const int bids[] = {ID_OP0, ID_OP0 + 1, ID_OP0 + 2, ID_OP0 + 3, ID_OP0 + 4, ID_OP0 + 5, ID_OP0 + 6, ID_OP0 + 7, ID_DETECT,
-                               ID_REFRESH, ID_SHOWALL, ID_BROWSE, ID_CHK1, ID_CHK2, ID_RADA, ID_RADB, ID_START, ID_CANCELBTN, ID_NEXT, ID_LOGBTN, ID_OPTS};
+                               ID_REFRESH, ID_SHOWALL, ID_BROWSE, ID_CHK1, ID_CHK2, ID_RADA, ID_RADB, ID_START, ID_CANCELBTN, ID_NEXT, ID_LOGBTN, ID_OPTS, ID_EJECT};
     for (int i = 0; i < (int)(sizeof bids / sizeof bids[0]); i++) SetWindowSubclass(Ctl(bids[i]), BtnSub, bids[i], 0);
 }
 
@@ -3088,6 +3142,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         int id = LOWORD(w), code = HIWORD(w);
         if (id >= ID_OP0 && id < ID_OP0 + OP_COUNT && code == BN_CLICKED) { if (!g_busy) ApplyOp(id - ID_OP0); }
         else if (id == ID_REFRESH && code == BN_CLICKED) { if (!g_busy) RefreshDisks(); }
+        else if (id == ID_EJECT && code == BN_CLICKED) { if (!g_busy) DoEject(); }
         else if (id == ID_SHOWALL && code == BN_CLICKED) { if (!g_busy) { SetChk(ID_SHOWALL, !Checked(ID_SHOWALL)); RefreshDisks(); } }
         else if (id == ID_BROWSE && code == BN_CLICKED) OnBrowse();
         else if (id == ID_COMBOB && code == CBN_SELCHANGE) { if (g_op == OP_RECOVER) RecoverUi(); }
