@@ -17,6 +17,8 @@
 #include "diag.h"
 #include "usage.h"
 #include "bench.h"
+#include "smart.h"
+#include "vhd.h"
 
 #define APP_TITLE L"SDCLONETOOLS"
 #define CHUNK (4u * 1024 * 1024)
@@ -3452,13 +3454,233 @@ static BOOL DoCsdArduino(Job *j) {
     return TRUE;
 }
 
-/* "Copiar só os dados" (destino menor que a origem): o código desta função não está no repositório.
- * A opção foi removida da interface; este stub só mantém o programa compilando. */
-static BOOL DoSmartCopy(Job *j) {
-    (void)j;
-    Log(L"Copiar só os dados para um cartão menor ainda não está disponível. Use um cartão de destino do mesmo tamanho ou maior.");
-    SetSummary(MB_ICONWARNING, L"Copiar só os dados para um cartão menor ainda não está disponível.\n\nUse um cartão de destino do mesmo tamanho ou maior.");
-    return FALSE;
+/* ------------------------------------------------------------ cópia inteligente (smart.h + vhd.h)
+ * Backup em .vhd só com os dados usados, clone partição por partição (também para cartão menor)
+ * e gravação de imagem .vhd ou de imagem maior que o cartão. */
+enum { SS_CARD = 0, SS_RAWFILE, SS_VHD };
+typedef struct { int kind; HANDLE h; VhdR vr; } SmSrc;
+typedef struct { int kind; HANDLE h; VhdW vw; } SmDst;
+
+static int FileRd(void *c, uint64_t off, void *buf, uint32_t len) { return ReadAtRaw(*(HANDLE *)c, off, buf, len) ? 1 : 0; }
+static int FileWr(void *c, uint64_t off, const void *buf, uint32_t len) { return WriteAtRaw(*(HANDLE *)c, off, buf, len) ? 1 : 0; }
+static int SmSrcRd(void *c, uint64_t off, void *buf, uint32_t len) {
+    SmSrc *s = (SmSrc *)c;
+    if (s->kind == SS_VHD) return VhdRRead(&s->vr, off, buf, len);
+    return ReadAtRaw(s->h, off, buf, len) ? 1 : 0;
+}
+static int SmDstWr(void *c, uint64_t off, const void *buf, uint32_t len) {
+    SmDst *d = (SmDst *)c;
+    if (d->kind == 1) return VhdWWrite(&d->vw, off, buf, len);
+    return WriteAtRaw(d->h, off, buf, len) ? 1 : 0;
+}
+static int SmTickCb(void *c, uint64_t done) { (void)c; g_done = (LONGLONG)done; return g_cancel ? 1 : 0; }
+static int SmProgCb(void *c, int part, int n) {
+    wchar_t t[120];
+    (void)c;
+    _snwprintf(t, 119, L"Lendo o mapa de blocos usados — partição %d de %d", part + 1, n);
+    t[119] = 0;
+    SetPhaseText(t);
+    return g_cancel ? 1 : 0;
+}
+static BOOL EndsWithI(const wchar_t *s, const wchar_t *e) {
+    size_t a = wcslen(s), b = wcslen(e);
+    return a >= b && _wcsicmp(s + a - b, e) == 0;
+}
+static const wchar_t *FsShort(int t) {
+    switch (t) {
+    case FST_FAT12: case FST_FAT16: case FST_FAT32: case FST_EXFAT: case FST_NTFS: case FST_EXT2: case FST_EXT3: case FST_EXT4: return FsNameW(t);
+    }
+    return L"outro tipo";
+}
+
+/* confere o que foi gravado: relê a origem (com os ajustes aplicados) e o destino */
+static BOOL SmVerify(const SmPlan *p, SmSrc *src, int (*drd)(void *, uint64_t, void *, uint32_t), void *dctx) {
+    uint8_t *a = (uint8_t *)ALLOC_ALIGNED(SM_CHUNK), *b = (uint8_t *)ALLOC_ALIGNED(SM_CHUNK);
+    BOOL ok = a && b;
+    uint64_t done = 0, diff = 0;
+    SetPhase(L"Conferindo o que foi gravado", p->copyBytes);
+    for (int i = 0; ok && i < p->copy.n; i++) {
+        uint64_t off = p->copy.v[i].off, left = p->copy.v[i].len;
+        while (ok && left) {
+            if (g_cancel) { ok = FALSE; break; }
+            uint32_t n = left > SM_CHUNK ? SM_CHUNK : (uint32_t)left;
+            if (!SmSrcRd(src, off, a, n)) { off += n; left -= n; continue; } /* setor ilegível na origem: não dá para comparar */
+            for (int k = 0; k < p->npatch; k++) {
+                uint64_t ps = p->patch[k].off, pe = ps + p->patch[k].len;
+                if (pe <= off || ps >= off + n) continue;
+                uint64_t s0 = ps > off ? ps : off, e0 = pe < off + n ? pe : off + n;
+                memcpy(a + (s0 - off), p->patch[k].data + (s0 - ps), (size_t)(e0 - s0));
+            }
+            if (!drd(dctx, off, b, n)) { LogErr(L"ler o destino para conferir"); ok = FALSE; break; }
+            if (memcmp(a, b, n) != 0) diff++;
+            off += n; left -= n; done += n;
+            g_done = (LONGLONG)done;
+        }
+    }
+    if (a) FREE_ALIGNED(a);
+    if (b) FREE_ALIGNED(b);
+    if (ok && diff) { Log(L"ATENÇÃO: %I64u trecho(s) gravado(s) diferente(s) da origem.", (unsigned long long)diff); ok = FALSE; }
+    else if (ok) Log(L"Conferência: tudo o que foi gravado está igual à origem.");
+    return ok;
+}
+
+static int VhdRd(void *c, uint64_t off, void *buf, uint32_t len) { return VhdRRead((VhdR *)c, off, buf, len); }
+static int CardRd(void *c, uint64_t off, void *buf, uint32_t len) { return ReadAtRaw(*(HANDLE *)c, off, buf, len) ? 1 : 0; }
+
+/* srcKind: SS_*; dstVhd: TRUE = arquivo .vhd em j->file (backup); FALSE = cartão j->dst */
+static BOOL DoSmart(Job *j, int srcKind, BOOL dstVhd) {
+    BOOL ok = FALSE, haveDev = FALSE, havePlan = FALSE, vhdOpen = FALSE;
+    SmSrc src;
+    SmDst dst;
+    Dev2 d;
+    SmPlan *p = (SmPlan *)calloc(1, sizeof(SmPlan));
+    VolSet vs;
+    vs.n = 0;
+    uint8_t *buf = NULL;
+    uint64_t srcSize = 0, dstSize = 0, bad = 0;
+    uint32_t sec = 512;
+    wchar_t a[32], b[32], c[32];
+    memset(&src, 0, sizeof src);
+    memset(&dst, 0, sizeof dst);
+    src.h = INVALID_HANDLE_VALUE;
+    dst.h = INVALID_HANDLE_VALUE;
+    if (!p) { Log(L"ERRO: memória insuficiente."); goto done; }
+
+    /* origem */
+    src.kind = srcKind;
+    if (srcKind == SS_CARD) {
+        src.h = OpenDisk(j->src, FALSE);
+        if (src.h == INVALID_HANDLE_VALUE) { LogErr(L"abrir o cartão de origem"); goto done; }
+        if (!DiskLenMatches(src.h, j->srcSize)) { Log(L"ERRO: o tamanho do cartão mudou. Atualize a lista."); goto done; }
+        srcSize = j->srcSize;
+        sec = j->srcSec ? j->srcSec : 512;
+    } else {
+        LARGE_INTEGER fsz;
+        src.h = CreateFileW(j->file, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (src.h == INVALID_HANDLE_VALUE) { LogErr(L"abrir a imagem"); goto done; }
+        if (!GetFileSizeEx(src.h, &fsz)) { LogErr(L"ler o tamanho da imagem"); goto done; }
+        if (srcKind == SS_VHD) {
+            if (!VhdROpen(&src.vr, FileRd, &src.h, (uint64_t)fsz.QuadPart)) { Log(L"ERRO: o arquivo .vhd não é válido ou é de um tipo sem suporte (diferencial)."); goto done; }
+            srcSize = src.vr.size;
+        } else srcSize = (uint64_t)fsz.QuadPart - (uint64_t)fsz.QuadPart % 512;
+        sec = j->dstSec ? j->dstSec : 512;
+    }
+    if (!Dev2Init(&d, SmSrcRd, &src, srcSize, sec)) { Log(L"ERRO: memória insuficiente."); goto done; }
+    haveDev = TRUE;
+    dstSize = dstVhd ? srcSize : j->dstSize;
+
+    /* plano */
+    SetIndet(L"Lendo as partições e os blocos usados...");
+    FmtSize(srcSize, a, 32);
+    Log(L"Cópia inteligente: só os dados usados de cada partição. Origem: %ls.", a);
+    if (!SmBuildPlan(&d, dstSize, p, SmProgCb, NULL)) {
+        wchar_t e[700];
+        MultiByteToWideChar(CP_UTF8, 0, p->err, -1, e, 700);
+        if (g_cancel) { Log(L"Cancelado. Nada foi gravado."); goto done; }
+        Log(L"ERRO: %ls.", e);
+        if (p->needBytes) { FmtSize(p->needBytes, b, 32); Log(L"Tamanho mínimo do destino para estes dados: %ls.", b); }
+        SetSummary(MB_ICONWARNING, L"Não foi possível fazer a cópia inteligente:\n\n%ls.%ls%ls\n\nNada foi gravado.", e,
+                   p->needBytes ? L"\n\nTamanho mínimo do destino: " : L"", p->needBytes ? (FmtSize(p->needBytes, c, 32), c) : L"");
+        goto done;
+    }
+    havePlan = TRUE;
+    for (int i = 0; i < p->nparts; i++) {
+        SmPart *s = &p->part[i];
+        FmtSize(s->size, a, 32);
+        FmtSize(s->used, b, 32);
+        if (s->newSize != s->size) {
+            FmtSize(s->newSize, c, 32);
+            Log(L"  Partição %d (%ls, %ls): %ls usados — será reduzida para %ls.", i + 1, FsShort(s->fs), a, b, c);
+        } else Log(L"  Partição %d (%ls, %ls): %ls %ls.", i + 1, FsShort(s->fs), a, s->how == SMH_WHOLE ? L"copiada inteira (tipo sem mapa de blocos):" : L"usados,", b);
+    }
+    FmtSize(p->copyBytes, a, 32);
+    FmtSize(srcSize, b, 32);
+    FmtSize(p->needBytes, c, 32);
+    Log(L"Vai copiar %ls de %ls. Destino mínimo para estes dados: %ls.", a, b, c);
+
+    /* destino */
+    if (dstVhd) {
+        wchar_t full[MAX_PATH], root[MAX_PATH];
+        ULARGE_INTEGER fa;
+        if (GetFullPathNameW(j->file, MAX_PATH, full, NULL) && GetVolumePathNameW(full, root, MAX_PATH) &&
+            GetDiskFreeSpaceExW(root, &fa, NULL, NULL) && fa.QuadPart < p->copyBytes + p->copyBytes / 50 + 64 * MIB) {
+            FmtSize(fa.QuadPart, c, 32);
+            Log(L"ERRO: espaço livre insuficiente no destino (%ls livres, a imagem terá cerca de %ls).", c, a);
+            goto done;
+        }
+        dst.kind = 1;
+        dst.h = CreateFileW(j->file, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (dst.h == INVALID_HANDLE_VALUE) { LogErr(L"criar o arquivo .vhd"); goto done; }
+        if (!VhdWOpen(&dst.vw, dstSize, FileWr, FileRd, &dst.h, (uint32_t)GetTickCount())) { Log(L"ERRO: memória insuficiente."); goto done; }
+        vhdOpen = TRUE;
+    } else {
+        if (j->dst == g_sysDisk) { Log(L"ERRO: disco do sistema — recusado."); goto done; }
+        if (!LockDiskVolumes(j->dst, &vs)) goto done;
+        dst.kind = 0;
+        dst.h = OpenDisk(j->dst, TRUE);
+        if (dst.h == INVALID_HANDLE_VALUE) { LogErr(L"abrir o cartão de destino para escrita"); goto done; }
+        if (!DiskLenMatches(dst.h, j->dstSize)) { Log(L"ERRO: o tamanho do cartão de destino mudou. Atualize a lista."); goto done; }
+    }
+
+    /* cópia */
+    buf = (uint8_t *)ALLOC_ALIGNED(SM_CHUNK);
+    if (!buf) { Log(L"ERRO: memória insuficiente."); goto done; }
+    SetPhase(dstVhd ? L"Criando a imagem só com os dados usados" : L"Copiando só os dados usados", p->copyBytes);
+    int rc = SmRun(p, SmSrcRd, &src, SmDstWr, &dst, buf, SmTickCb, NULL, &bad);
+    if (rc == 2) { Log(L"Operação cancelada pelo usuário."); goto done; }
+    if (rc == -1) { LogErr(L"falha ao gravar no destino"); goto done; }
+    if (dstVhd) {
+        vhdOpen = FALSE;
+        if (!VhdWClose(&dst.vw)) { LogErr(L"finalizar o arquivo .vhd"); goto done; }
+        FlushFileBuffers(dst.h);
+    } else {
+        FlushFileBuffers(dst.h);
+        UpdateDiskProps(dst.h);
+    }
+    if (bad) Log(L"ATENÇÃO: %I64u bytes ilegíveis na origem foram gravados como zeros.", (unsigned long long)bad);
+
+    /* conferência */
+    if (j->verify) {
+        BOOL vok;
+        if (dstVhd) {
+            LARGE_INTEGER fsz;
+            VhdR vr;
+            GetFileSizeEx(dst.h, &fsz);
+            if (!VhdROpen(&vr, FileRd, &dst.h, (uint64_t)fsz.QuadPart)) { Log(L"ERRO: o .vhd criado não pôde ser reaberto."); goto done; }
+            vok = SmVerify(p, &src, VhdRd, &vr);
+            VhdRClose(&vr);
+        } else vok = SmVerify(p, &src, CardRd, &dst.h);
+        if (!vok) goto done;
+    }
+    ok = TRUE;
+    FmtSize(p->copyBytes, a, 32);
+    FmtSize(srcSize, b, 32);
+    if (dstVhd) {
+        LARGE_INTEGER fsz;
+        GetFileSizeEx(dst.h, &fsz);
+        FmtSize((uint64_t)fsz.QuadPart, c, 32);
+        Log(L"Imagem .vhd criada: %ls no disco (cartão de %ls).", c, b);
+        SetSummary(bad ? MB_ICONWARNING : MB_ICONINFORMATION, L"Backup criado só com os dados usados.\n\nArquivo: %ls\nTamanho do arquivo: %ls (o cartão tem %ls)%ls\n\nPara ver os arquivos, dê dois cliques no .vhd (o Windows monta como um disco). Para voltar ao cartão, use Gravar imagem: funciona até em um cartão menor, se os dados couberem.",
+                   j->file, c, b, bad ? L"\n\nATENÇÃO: havia setores ilegíveis, gravados como zeros." : L"");
+    } else {
+        Log(L"Cópia concluída: %ls copiados.", a);
+        SetSummary(bad ? MB_ICONWARNING : MB_ICONINFORMATION, L"Cópia concluída: só os dados usados (%ls) foram copiados%ls%ls.%ls\n\nSe o Windows pedir para formatar o disco, clique em Cancelar.", a,
+                   j->verify ? L" e conferidos" : L"", p->shrunk ? L"; a última partição foi reduzida para caber no cartão" : L"",
+                   bad ? L"\n\nATENÇÃO: havia setores ilegíveis na origem, gravados como zeros." : L"");
+    }
+done:
+    if (vhdOpen) VhdWClose(&dst.vw);
+    if (dst.h != INVALID_HANDLE_VALUE) CloseHandle(dst.h);
+    UnlockVolumes(&vs);
+    if (srcKind == SS_VHD) VhdRClose(&src.vr);
+    if (src.h != INVALID_HANDLE_VALUE) CloseHandle(src.h);
+    if (haveDev) Dev2Free(&d);
+    if (havePlan || p) { if (p) SmPlanFree(p); free(p); }
+    if (buf) FREE_ALIGNED(buf);
+    if (!ok && dstVhd && dst.kind == 1) DeleteFileW(j->file);
+    if (!ok && g_summary[0] == 0)
+        SetSummary(MB_ICONERROR, dstVhd ? L"O backup não foi concluído. Veja o registro para detalhes." : L"A cópia não foi concluída. O cartão de destino pode estar incompleto — veja o registro.");
+    return ok;
 }
 
 static DWORD WINAPI Worker(LPVOID p) {
@@ -3468,9 +3690,9 @@ static DWORD WINAPI Worker(LPVOID p) {
     g_badLogged = 0;
     g_summary[0] = 0;
     switch (j->op) {
-    case OP_C2I: ok = DoCardToImage(j); break;
-    case OP_I2C: ok = DoImageToCard(j); break;
-    case OP_C2C: ok = j->mode ? DoSmartCopy(j) : DoCardToCard(j); break;
+    case OP_C2I: ok = j->mode == 0 ? DoSmart(j, SS_CARD, TRUE) : DoCardToImage(j); break;
+    case OP_I2C: ok = j->mode ? DoSmart(j, EndsWithI(j->file, L".vhd") ? SS_VHD : SS_RAWFILE, FALSE) : DoImageToCard(j); break;
+    case OP_C2C: ok = j->mode == 0 ? DoSmart(j, SS_CARD, FALSE) : DoCardToCard(j); break;
     case OP_VERIFY: ok = (j->mode == 2) ? DoCapacity(j) : DoVerify(j); break;
     case OP_RECOVER:
         switch (j->mode) {
@@ -3564,7 +3786,8 @@ static void Relayout(void) {
         Place(ID_LBL2, X, y, W, 20);
         y += 24;
         if (CtlVisible(ID_COMBO2)) Place(ID_COMBO2, X, y, W, 300);
-        if (CtlVisible(ID_COMBOB)) {
+        if (CtlVisible(ID_COMBO2) && CtlVisible(ID_COMBOB)) { y += 32 + 10; Place(ID_COMBOB, X, y, W, 300); }
+        else if (CtlVisible(ID_COMBOB)) {
             if (CtlVisible(ID_COMBOC)) {
                 int bw = W * 55 / 100;
                 Place(ID_COMBOB, X, y, bw, 300);
@@ -3664,6 +3887,12 @@ static void FillModeCombo(int op) {
     SendMessageW(c, CB_RESETCONTENT, 0, 0);
     if (op == OP_RECOVER) {
         for (int i = 0; i < RM_COUNT; i++) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)RECOVER_MODES[i]);
+    } else if (op == OP_C2I) {
+        SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"Inteligente: só os dados usados, imagem .vhd (fica do tamanho dos dados)");
+        SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"Cópia exata setor a setor, imagem .img (tamanho do cartão inteiro)");
+    } else if (op == OP_C2C) {
+        SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"Inteligente: só os dados usados, partição por partição (aceita cartão menor)");
+        SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"Cópia exata setor a setor (destino do mesmo tamanho ou maior)");
     } else {
         for (int i = 0; i < NBRANDS; i++) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)BRANDS[i].name);
     }
@@ -3750,9 +3979,9 @@ static void RedrawNav(void) {
 
 static void ApplyOp(int op) {
     static const wchar_t *desc[] = {
-        L"Cria um arquivo .img com uma cópia exata do cartão, setor por setor. Áreas ilegíveis são puladas para o backup não travar.",
-        L"Grava um arquivo de imagem (.img, .iso, .bin) no cartão e confere a gravação.",
-        L"Copia um cartão direto em outro. O destino precisa ser do mesmo tamanho ou maior.",
+        L"Guarda o cartão num arquivo. No modo inteligente, a imagem .vhd leva só os dados usados (um cartão de 64 GB com 25 GB usados vira um arquivo de uns 25 GB) e abre no Windows com dois cliques.",
+        L"Grava uma imagem (.vhd, .img, .iso, .bin) no cartão e confere. Imagem maior que o cartão também funciona se os dados couberem: a última partição é reduzida.",
+        L"Copia um cartão para outro. No modo inteligente copia só os dados usados, partição por partição, e funciona até num cartão menor, se os dados couberem.",
         L"Lê o cartão inteiro procurando setores ilegíveis e, se quiser, compara com uma imagem.",
         L"Repara cartão sem acesso ou com capacidade errada e recupera arquivos.",
         L"Descobre se o cartão é verdadeiro: fabricante gravado no cartão, capacidade real e velocidade.",
@@ -3768,10 +3997,10 @@ static void ApplyOp(int op) {
     ShowCtl(ID_DESC, TRUE);
     SetDlgItemTextW(g_hwnd, ID_TITLE, NAV_T[op]);
     SetDlgItemTextW(g_hwnd, ID_DESC, desc[op]);
-    ShowCtl(ID_LBL2, op == OP_C2C || op == OP_AUTH || op == OP_RECOVER);
+    ShowCtl(ID_LBL2, op == OP_C2C || op == OP_C2I || op == OP_AUTH || op == OP_RECOVER);
     ShowCtl(ID_COMBO2, op == OP_C2C);
-    ShowCtl(ID_COMBOB, op == OP_AUTH || op == OP_RECOVER);
-    if (op == OP_AUTH || op == OP_RECOVER) FillModeCombo(op);
+    ShowCtl(ID_COMBOB, op == OP_AUTH || op == OP_RECOVER || op == OP_C2I || op == OP_C2C);
+    if (op == OP_AUTH || op == OP_RECOVER || op == OP_C2I || op == OP_C2C) FillModeCombo(op);
     ShowCtl(ID_COMBOC, op == OP_AUTH);
     BOOL file = (op == OP_C2I || op == OP_I2C || op == OP_VERIFY || op == OP_RECOVER);
     ShowCtl(ID_LBLFILE, file);
@@ -3789,12 +4018,13 @@ static void ApplyOp(int op) {
     switch (op) {
     case OP_C2I:
         SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão de origem");
+        SetDlgItemTextW(g_hwnd, ID_LBL2, L"Tipo de backup");
         SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Salvar a imagem em");
         SetDlgItemTextW(g_hwnd, ID_CHK1, L"Conferir a imagem depois de criar (demora mais)");
         break;
     case OP_I2C:
         SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão de destino (será apagado)");
-        SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Arquivo de imagem (.img, .iso, .bin)");
+        SetDlgItemTextW(g_hwnd, ID_LBLFILE, L"Arquivo de imagem (.vhd, .img, .iso, .bin)");
         SetDlgItemTextW(g_hwnd, ID_CHK1, L"Conferir depois de gravar (recomendado)");
         SetChk(ID_CHK1, TRUE);
         break;
@@ -3966,7 +4196,15 @@ static void OnStart(void) {
     j->verify = c1;
     switch (g_op) {
     case OP_C2I:
+        j->mode = RecoverMode(); /* 0 = inteligente (.vhd), 1 = setor a setor (.img) */
         if (!path[0]) { Warn(L"Escolha onde salvar o arquivo de imagem."); return; }
+        if (j->mode == 0 && !EndsWithI(path, L".vhd")) {
+            wchar_t *dot = wcsrchr(path, L'.'), *sl = wcsrchr(path, L'\\');
+            if (dot && (!sl || dot > sl)) *dot = 0;
+            if (wcslen(path) + 4 < MAX_PATH) wcscat(path, L".vhd");
+            SetDlgItemTextW(g_hwnd, ID_EDITFILE, path);
+            wcsncpy(j->file, path, MAX_PATH - 1);
+        }
         if (PathOnDisk(path, s->index)) { Warn(L"A imagem não pode ser salva dentro do próprio cartão."); return; }
         break;
     case OP_I2C: {
@@ -3975,11 +4213,13 @@ static void OnStart(void) {
         if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fa) || (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { Warn(L"O arquivo de imagem não foi encontrado."); return; }
         uint64_t fs64 = ((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
         if (fs64 == 0) { Warn(L"O arquivo de imagem está vazio."); return; }
-        if (fs64 > s->size) { Warn(L"A imagem é maior que o cartão de destino."); return; }
         if (PathOnDisk(path, s->index)) { Warn(L"A imagem está dentro do cartão de destino."); return; }
+        /* .vhd ou imagem maior que o cartão: grava só os dados usados (e reduz a última partição se precisar) */
+        j->mode = (EndsWithI(path, L".vhd") || fs64 > s->size) ? 1 : 0;
         wchar_t a[32], b[32];
         FmtSize(fs64, a, 32); FmtSize(s->size, b, 32);
-        _snwprintf(msg, 1799, L"Gravar a imagem:\n%ls (%ls)\n\nno cartão:\n%ls\n\nTODO O CONTEÚDO DO CARTÃO SERÁ APAGADO. Continuar?", path, a, s->label);
+        _snwprintf(msg, 1799, L"Gravar a imagem:\n%ls (%ls)\n\nno cartão:\n%ls\n\n%lsTODO O CONTEÚDO DO CARTÃO SERÁ APAGADO. Continuar?", path, a, s->label,
+                   j->mode && fs64 > s->size && !EndsWithI(path, L".vhd") ? L"A imagem é maior que o cartão: só os dados usados serão gravados e a última partição será reduzida, se os dados couberem.\n\n" : L"");
         if (!Confirm(msg)) return;
         j->dst = s->index; j->dstSize = s->size; j->dstSec = s->sec;
         break;
@@ -3988,9 +4228,9 @@ static void OnStart(void) {
         if (!t) { Warn(L"Selecione o cartão de destino."); return; }
         if (t->index == g_sysDisk) { Warn(L"O destino é o disco do sistema. Operação recusada."); return; }
         if (t->index == s->index) { Warn(L"Origem e destino são o mesmo cartão."); return; }
-        j->mode = c2 ? 1 : 0;
-        if (t->size < s->size && !j->mode) {
-            Warn(L"O cartão de destino é MENOR que o de origem.\n\nUse um cartão de destino do mesmo tamanho ou maior.");
+        j->mode = RecoverMode(); /* 0 = inteligente, 1 = setor a setor */
+        if (t->size < s->size && j->mode == 1) {
+            Warn(L"O cartão de destino é MENOR que o de origem.\n\nNa cópia setor a setor o destino precisa ser do mesmo tamanho ou maior. Escolha o modo inteligente: ele copia só os dados usados e reduz a última partição, se os dados couberem.");
             return;
         }
         _snwprintf(msg, 1799, L"Copiar:\n%ls\n\npara:\n%ls\n\nTODO O CONTEÚDO DO DESTINO SERÁ APAGADO. Continuar?", s->label, t->label);
@@ -4085,10 +4325,12 @@ static void OnBrowse(void) {
     ofn.hwndOwner = g_hwnd;
     ofn.lpstrFile = path;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrFilter = L"Imagens de disco (*.img;*.iso;*.bin;*.raw;*.dd)\0*.img;*.iso;*.bin;*.raw;*.dd\0Todos os arquivos (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"Imagens de disco (*.vhd;*.img;*.iso;*.bin;*.raw;*.dd)\0*.vhd;*.img;*.iso;*.bin;*.raw;*.dd\0Todos os arquivos (*.*)\0*.*\0";
     if (g_op == OP_C2I) {
-        if (!path[0]) wcscpy(path, L"cartao.img");
-        ofn.lpstrDefExt = L"img";
+        BOOL vhd = RecoverMode() == 0;
+        if (!path[0]) wcscpy(path, vhd ? L"cartao.vhd" : L"cartao.img");
+        ofn.lpstrFilter = vhd ? L"Imagem VHD (*.vhd)\0*.vhd\0" : L"Imagem de disco (*.img)\0*.img\0Todos os arquivos (*.*)\0*.*\0";
+        ofn.lpstrDefExt = vhd ? L"vhd" : L"img";
         ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
         if (GetSaveFileNameW(&ofn)) SetDlgItemTextW(g_hwnd, ID_EDITFILE, path);
     } else {
@@ -4344,6 +4586,18 @@ static void SetupDemo(void) {
         return;
     }
     if (strcmp(g_demo, "auth") == 0) { g_jdisk = 1; g_jdone[0] = TRUE; ApplyOp(OP_AUTH); return; }
+    if (strcmp(g_demo, "backup") == 0) { ApplyOp(OP_C2I); SetDlgItemTextW(g_hwnd, ID_EDITFILE, L"D:\\Backups\\cartao_r36s.vhd"); return; }
+    if (strcmp(g_demo, "clone") == 0) {
+        g_ndisks = 2;
+        DiskInfo *e = &g_disks[1];
+        *e = *d;
+        e->index = 2; e->size = 31914983424ull; wcscpy(e->vendor, L"Samsung"); wcscpy(e->product, L"EVO Plus"); wcscpy(e->letters, L"F:");
+        wcscpy(e->label, L"Disco 2 — Samsung EVO Plus — 29,7 GB [USB] (F:)");
+        FillDiskCombo(ID_COMBO1, 1);
+        FillDiskCombo(ID_COMBO2, 2);
+        ApplyOp(OP_C2C);
+        return;
+    }
 }
 
 /* cartão novo conectado: seleciona e volta para a tela inicial do Diagnóstico */
@@ -4393,7 +4647,16 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         else if (id == ID_SHOWALL && code == BN_CLICKED) { if (!g_busy) { SetChk(ID_SHOWALL, !Checked(ID_SHOWALL)); RefreshDisks(); } }
         else if (id == ID_BROWSE && code == BN_CLICKED) OnBrowse();
-        else if (id == ID_COMBOB && code == CBN_SELCHANGE) { if (g_op == OP_RECOVER) RecoverUi(); }
+        else if (id == ID_COMBOB && code == CBN_SELCHANGE) {
+            if (g_op == OP_RECOVER) RecoverUi();
+            else if (g_op == OP_C2I) { /* troca a extensão do arquivo conforme o tipo de backup */
+                wchar_t pth[MAX_PATH];
+                GetDlgItemTextW(g_hwnd, ID_EDITFILE, pth, MAX_PATH);
+                wchar_t *dot = wcsrchr(pth, L'.'), *sl = wcsrchr(pth, L'\\');
+                if (pth[0] && dot && (!sl || dot > sl) && wcslen(pth) < MAX_PATH - 5) { wcscpy(dot, RecoverMode() == 0 ? L".vhd" : L".img"); SetDlgItemTextW(g_hwnd, ID_EDITFILE, pth); }
+                UpdateEnable();
+            } else UpdateEnable();
+        }
         else if ((id == ID_CHK1 || id == ID_CHK2 || id == ID_RADA || id == ID_RADB) && code == BN_CLICKED) {
             if (id == ID_RADA || id == ID_RADB) { SetChk(ID_RADA, id == ID_RADA); SetChk(ID_RADB, id == ID_RADB); }
             else SetChk(id, !Checked(id));

@@ -86,22 +86,32 @@ Ligação dos fios, como gravar o programa na placa e a tabela de resultados: [a
 ![Proteção do cartão](img/protecao.png)
 
 ### Fazer backup (cartão para imagem)
-Cria um arquivo `.img` com uma cópia exata, setor por setor, de todo o cartão. Serve para backup ou para clonar depois.
-- Escolha o cartão e o local do arquivo `.img` (precisa ter espaço livre igual ao tamanho do cartão).
-- Opção **Verificar a imagem depois de criar**: compara o arquivo com o cartão (demora o dobro).
-- Setores ilegíveis são gravados como zeros e contados no resultado.
-- Não salve a imagem dentro do próprio cartão (o app bloqueia).
+Escolha o **tipo de backup**:
+
+- **Inteligente (.vhd)**, o padrão: guarda só os dados usados de cada partição. Um cartão de 64 GB com 25 GB usados vira um arquivo de uns 25 GB. Dê dois cliques no `.vhd` para o Windows montar e mostrar os arquivos. Funciona com FAT, exFAT e ext4 (Linux dos consoles); partições de outro tipo entram inteiras.
+- **Cópia exata (.img)**: setor a setor, do tamanho do cartão inteiro. Use quando quiser uma cópia bit a bit (por exemplo, para análise ou recuperação de arquivos apagados, que ficam nos blocos "livres").
+
+Opção **Conferir a imagem depois de criar**: relê e compara (demora mais). Setores ilegíveis são gravados como zeros e contados no resultado. Não salve a imagem dentro do próprio cartão (o app bloqueia).
+
+![Fazer backup](img/tela-backup.png)
 
 ### Gravar imagem (imagem para cartão)
-Grava um arquivo `.img`, `.iso` ou `.bin` no cartão. **Apaga todo o conteúdo do cartão.**
-- Escolha o cartão de destino e o arquivo de imagem (deve caber no cartão).
-- Mantenha marcado **Verificar depois de gravar** (recomendado).
+Grava `.vhd`, `.img`, `.iso` ou `.bin` no cartão. **Apaga o conteúdo do cartão.**
+- `.vhd` e imagens **maiores que o cartão** são gravados com a cópia inteligente: só os dados usados, e a última partição é reduzida se precisar (veja abaixo). Se os dados não couberem, o app diz o tamanho mínimo e não grava nada.
+- Mantenha marcado **Conferir depois de gravar** (recomendado).
 - Se o Windows pedir para formatar o disco ao final, clique em **Cancelar**.
 
 ### Clonar cartão
-Clona direto de um cartão para outro. **Apaga todo o conteúdo do destino.**
-- Escolha origem e destino. Normalmente o destino deve ser **igual ou maior** que a origem. Se for maior, o espaço extra fica sem partição.
-- Dica: com um só leitor, use Fazer backup e depois Gravar imagem.
+Copia um cartão direto em outro. **Apaga todo o conteúdo do destino.** Escolha o modo:
+
+- **Inteligente** (padrão): copia partição por partição, só os dados usados. Funciona em cartão **menor**: 64 GB com 25 GB usados cabe num cartão de 32 GB. A última partição é reduzida para caber (FAT16, FAT32 ou exFAT, como a partição de ROMs dos consoles), sem mover dados, e a tabela MBR ou GPT é ajustada. O carregador de boot que fica antes da primeira partição é copiado junto.
+- **Setor a setor**: cópia exata, o destino precisa ser do mesmo tamanho ou maior.
+
+Quando a cópia inteligente não é possível, o app explica e não grava nada: dados espalhados até o fim da partição (o app mostra o tamanho mínimo), última partição Linux (ext4) ou NTFS (não dá para reduzir), ou cartão sem tabela de partições (use setor a setor).
+
+![Clonar cartão](img/tela-clone.png)
+
+Dica: com um só leitor, faça o backup inteligente e depois use **Gravar imagem** no outro cartão.
 
 ### Verificar setores
 - **Leitura completa:** lê o cartão inteiro procurando setores ilegíveis e mostra a velocidade média. Não altera nada.
@@ -181,6 +191,8 @@ Depois do teste completo, use **Recuperar e reparar → Restaurar cartão** para
 | Arquivo | Conteúdo |
 |---|---|
 | `sdclone.c` | Interface Win32 e operações de disco |
+| `smart.h` | Cópia inteligente (blocos usados, redução de FAT/exFAT, ajuste de MBR/GPT) |
+| `vhd.h` | Imagem `.vhd` dinâmica |
 | `usage.h` | Conteúdo do cartão: ocupação, tipos de arquivo e perfil de uso (sem Windows, testado em Linux) |
 | `bench.h` | Julgamento do teste de desempenho (sem Windows) |
 | `core.h` | Motor de recuperação (assinaturas de arquivo), padrão do teste de capacidade e tabela de fabricantes |
@@ -208,6 +220,7 @@ gcc -O1 -o test_core test_core.c && ./test_core
 
 ```sh
 python3 tests/run_tests.py
+python3 tests/run_smart.py   # cópia inteligente e .vhd (precisa também de exfat-fuse e qemu-utils)
 ```
 
 Cria imagens reais (FAT12/16/32, exFAT, ext2/3/4, MBR, GPT, tabela perdida, cartão minúsculo, etc.), lê todos os arquivos e confere o CRC.

@@ -34,6 +34,12 @@ Cartão com defeito: o próximo passo vira backup.
 
 ![Desempenho](docs/img/tela-bench.png)
 
+**Backup e clone inteligentes**: escolha o tipo na própria tela.
+
+![Fazer backup](docs/img/tela-backup.png)
+
+![Clonar cartão](docs/img/tela-clone.png)
+
 **Proteção do cartão**: dois modos separados, leitor interno do computador ou Arduino/ESP32.
 
 ![Proteção do cartão](docs/img/protecao.png)
@@ -59,9 +65,9 @@ Para ver as telas sem mexer em nenhum cartão: `SDCloneTools.exe --demo=hero` (t
 | **Recuperar e reparar** | Análise de partições, ver e copiar arquivos (inclusive ext4 de consoles), reconstruir partições perdidas sem apagar dados, procurar arquivos apagados (de uma imagem ou do cartão) e restaurar o cartão |
 | **Autenticidade** | Descobre se o cartão é verdadeiro ou falso: marca, fabricante registrado, capacidade real e velocidade |
 | **Verificar setores** | Leitura completa, comparação com uma imagem e teste de capacidade real |
-| **Fazer backup** | Cartão para arquivo `.img`, com conferência opcional |
-| **Gravar imagem** | Grava `.img`, `.iso` ou `.bin` no cartão, com verificação |
-| **Clonar cartão** | Copia um cartão direto para outro |
+| **Fazer backup** | **Inteligente**: imagem `.vhd` só com os dados usados (cartão de 64 GB com 25 GB usados vira um arquivo de ~25 GB, que o Windows abre com dois cliques). Ou cópia exata setor a setor em `.img` |
+| **Gravar imagem** | Grava `.vhd`, `.img`, `.iso` ou `.bin` no cartão, com conferência. Imagem maior que o cartão também vai, se os dados couberem |
+| **Clonar cartão** | **Inteligente**: copia só os dados usados, partição por partição, e aceita cartão menor (64 GB com 25 GB usados → cartão de 32 GB). Ou cópia exata setor a setor |
 
 ### Proteção do cartão: dois modos
 
@@ -73,6 +79,18 @@ Para ver as telas sem mexer em nenhum cartão: `SDCloneTools.exe --demo=hero` (t
 | Instalação | Nenhuma | Gravar o programa em [`arduino/`](arduino/LEIA.md) na placa |
 
 No modo Arduino, o app lista as portas USB, marca as que parecem Arduino ou ESP32 e confirma que a placa tem o programa do SD Clone Tools antes de começar. O resultado diz se o bloqueio é proteção temporária, proteção permanente, senha ou **firmware travado em somente leitura** (o cartão recusa gravar mesmo sem nenhum bit ligado; não há conserto por software, só salvar os dados). Se o cartão grava normalmente direto no Arduino, o defeito está no leitor ou adaptador do computador. A ligação dos fios e o passo a passo estão em [arduino/LEIA.md](arduino/LEIA.md).
+
+### Backup e clone inteligentes (como o Acronis)
+
+Como no Acronis, a cópia é feita **partição por partição, só com os blocos que o sistema de arquivos usa**:
+
+- **FAT16/FAT32, exFAT e ext2/3/4** (Linux dos consoles): o app lê o mapa de blocos usados de cada partição e copia só eles. Partições de outro tipo (NTFS, desconhecidas) vão inteiras.
+- A área antes da primeira partição (tabela e **carregador de boot** dos consoles, como o do R36S) e os pequenos espaços entre partições vão sempre.
+- **Destino menor**: a última partição é reduzida para caber, sem mover dados, desde que todos os dados usados caibam (FAT16, FAT32 e exFAT, que é o caso da partição de ROMs). A tabela MBR ou GPT é ajustada. Se não couber, o app diz o tamanho mínimo e não grava nada. Partição Linux (ext4) no fim não pode ser reduzida, e o app explica.
+- **Backup em `.vhd` dinâmico**: só os blocos gravados ocupam espaço no arquivo. O Windows abre o `.vhd` com dois cliques (Montar) para você ver os arquivos, e o **Gravar imagem** devolve ele a um cartão do mesmo tamanho, maior ou menor.
+- Com **Conferir** marcado, tudo o que foi gravado é relido e comparado com a origem.
+
+Testado em Linux com cartões montados de verdade (MBR e GPT; FAT32, ext4 e exFAT): reduções de 1200 MB para 900 MB passam no `fsck.vfat`, `e2fsck`, `fsck.exfat` e `sfdisk --verify`, todos os arquivos conferem byte a byte, e o `.vhd` é lido pelo `qemu-img` (veja `tests/run_smart.py`).
 
 ### Cartão de 128 GB aparecendo com poucos MB? Cartão "sem acesso"?
 
@@ -133,6 +151,8 @@ O segundo precisa de `dosfstools mtools exfatprogs exfat-fuse e2fsprogs fdisk`.
 | Arquivo | Conteúdo |
 |---|---|
 | `sdclone.c` | Interface Win32 e operações de disco |
+| `smart.h` | Cópia inteligente: blocos usados por partição (FAT, exFAT, ext), plano de cópia, redução de FAT/exFAT e ajuste de MBR/GPT |
+| `vhd.h` | Leitura e gravação de `.vhd` dinâmico |
 | `usage.h` | Conteúdo do cartão: ocupação, tipos de arquivo e perfil de uso (sem Windows, testado em Linux) |
 | `bench.h` | Julgamento do teste de desempenho (sem Windows) |
 | `arduino/` | Programa para Arduino/ESP32 e guia de ligação (modo Arduino da Proteção do cartão) |
