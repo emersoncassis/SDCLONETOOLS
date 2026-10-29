@@ -28,7 +28,8 @@ O menu à esquerda tem as funções; a área à direita mostra a tarefa e, no fi
 
 | Função | Para que serve |
 |---|---|
-| **Diagnóstico** | Analisa o cartão sem apagar nada: tabela de partições, leitura em 128 pontos, teste opcional de gravação (grava 4 KB em 2 pontos e devolve o conteúdo original) e leitura do registro CID. Termina com um veredito claro: causa provável, se o cartão tem conserto, se dá para salvar os dados e o que fazer agora |
+| **Diagnóstico** | Analisa o cartão sem apagar nada: tabela de partições, leitura em 128 pontos, teste opcional de gravação (grava 4 KB em 2 pontos e devolve o conteúdo original) e leitura do registro CID. Termina com um veredito claro (aba **Saúde**): causa provável, se o cartão tem conserto, se dá para salvar os dados e o que fazer agora. A aba **Conteúdo** mostra quanto do cartão está ocupado, em gráfico, os tipos de arquivo (jogos, sistema e emulador, música, vídeo, fotos, documentos...), as extensões mais comuns, o tipo de uso do cartão (game stick, câmera, música...) e se ele serve para esse uso |
+| **Desempenho** | Mede leitura e gravação sequencial e de 4 KB, mostra a velocidade durante o teste e diz se o cartão é bom para game stick, para fotos e vídeo (Full HD/4K) ou se é um cartão genérico em que não dá para confiar |
 | **Proteção do cartão** | Lê os bits de proteção contra gravação (CSD) e o bloqueio por senha, para saber se o cartão está travado por proteção ou pelo firmware. Tem dois modos, descritos abaixo |
 | **Recuperar e reparar** | Análise de partições, ver e copiar arquivos (inclusive ext4 de consoles), reconstruir partições perdidas sem apagar dados, procurar arquivos apagados (de uma imagem ou do cartão) e restaurar o cartão |
 | **Autenticidade** | Descobre se o cartão é verdadeiro ou falso: marca, fabricante registrado, capacidade real e velocidade |
@@ -107,6 +108,8 @@ O segundo precisa de `dosfstools mtools exfatprogs exfat-fuse e2fsprogs fdisk`.
 | Arquivo | Conteúdo |
 |---|---|
 | `sdclone.c` | Interface Win32 e operações de disco |
+| `usage.h` | Conteúdo do cartão: ocupação, tipos de arquivo e perfil de uso (sem Windows, testado em Linux) |
+| `bench.h` | Julgamento do teste de desempenho (sem Windows) |
 | `arduino/` | Programa para Arduino/ESP32 e guia de ligação (modo Arduino da Proteção do cartão) |
 | `core.h` | Motor de recuperação, padrão do teste de capacidade e tabela de fabricantes |
 | `fsread.h` | Leitura somente leitura de FAT12/16/32, exFAT e ext2/3/4 |

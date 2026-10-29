@@ -14,6 +14,8 @@
 #include <wchar.h>
 #include "core.h"
 #include "diag.h"
+#include "usage.h"
+#include "bench.h"
 
 #define APP_TITLE L"SDCLONETOOLS"
 #define CHUNK (4u * 1024 * 1024)
@@ -22,7 +24,7 @@
 #define WM_APP_LOG (WM_APP + 1)
 #define WM_APP_DONE (WM_APP + 2)
 
-enum { OP_C2I = 0, OP_I2C, OP_C2C, OP_VERIFY, OP_RECOVER, OP_AUTH, OP_DIAG, OP_CSD, OP_COUNT };
+enum { OP_C2I = 0, OP_I2C, OP_C2C, OP_VERIFY, OP_RECOVER, OP_AUTH, OP_DIAG, OP_CSD, OP_BENCH, OP_COUNT };
 
 enum {
     ID_OP0 = 100, /* 100..107 */
@@ -156,19 +158,32 @@ static void LoadPalette(void) {
 #define TASK_Y 164
 #define CARD_PAD 16
 #define NAV_Y0 52
-#define NAV_SEP_Y 260
-#define NAV_Y1 272
+#define NAV_SEP_Y 296
+#define NAV_Y1 308
 
 /* resultado do diagnóstico (preenchido pela thread de trabalho, lido pela interface ao terminar) */
 enum { NX_NONE = 0, NX_BACKUP, NX_CARVE, NX_REBUILD, NX_RESTORE, NX_AUTH };
 enum { MC_DATA = 0, MC_EMPTY, MC_SLOW, MC_BAD, MC_SKIP };
 #define MAP_N 128
+#define IS_VIEW(op) ((op) == OP_DIAG || (op) == OP_CSD || (op) == OP_BENCH) /* páginas que terminam em veredito */
 typedef struct {
     BOOL valid, map;
     int op, level, next; /* level: 0 ok, 1 atenção, 2 grave */
     wchar_t title[160], cause[400], card[300], data[300], todo[300];
     uint8_t cell[MAP_N];
     int nData, nEmpty, nSlow, nBad, nSkip;
+    /* conteúdo do cartão (aba "Conteúdo" do Diagnóstico) */
+    BOOL usage;
+    UsageStat us;
+    uint64_t uCard;
+    int uProfile;
+    wchar_t uTitle[160], uOcc[300], uTop[400], uUse[420], uFit[520];
+    /* desempenho */
+    BOOL bench;
+    BenchRes br;
+    BenchJudge bj;
+    float curveR[64], curveW[64];
+    int nCurveR, nCurveW;
 } Verdict;
 static Verdict g_vd;
 static BOOL g_showLog = FALSE;
@@ -371,13 +386,13 @@ static void Tick(HDC dc, float x1, float y1, float x2, float y2, float x3, float
 
 /* ---------------------------------------------------------------- textos */
 /* indexados por operação: C2I, I2C, C2C, VERIFY, RECOVER, AUTH, DIAG */
-static const wchar_t *NAV_T[] = {L"Fazer backup", L"Gravar imagem", L"Clonar cartão", L"Verificar setores", L"Recuperar e reparar", L"Autenticidade", L"Diagnóstico", L"Proteção do cartão"};
-static const wchar_t NAV_G[] = {0xE74E, 0xE896, 0xE8C8, 0xE721, 0xE90F, 0xEA18, 0xE9D9, 0xE72E};
-static const int NAV_ORDER[] = {OP_DIAG, OP_CSD, OP_RECOVER, OP_AUTH, OP_VERIFY, OP_C2I, OP_I2C, OP_C2C};
-static const wchar_t *START_T[] = {L"Criar backup", L"Gravar no cartão", L"Clonar cartão", L"Iniciar verificação", L"Iniciar", L"Analisar cartão", L"Analisar cartão", L"Ler proteção"};
+static const wchar_t *NAV_T[] = {L"Fazer backup", L"Gravar imagem", L"Clonar cartão", L"Verificar setores", L"Recuperar e reparar", L"Autenticidade", L"Diagnóstico", L"Proteção do cartão", L"Desempenho"};
+static const wchar_t NAV_G[] = {0xE74E, 0xE896, 0xE8C8, 0xE721, 0xE90F, 0xEA18, 0xE9D9, 0xE72E, 0xE916};
+static const int NAV_ORDER[] = {OP_DIAG, OP_BENCH, OP_CSD, OP_RECOVER, OP_AUTH, OP_VERIFY, OP_C2I, OP_I2C, OP_C2C};
+static const wchar_t *START_T[] = {L"Criar backup", L"Gravar no cartão", L"Clonar cartão", L"Iniciar verificação", L"Iniciar", L"Analisar cartão", L"Analisar cartão", L"Ler proteção", L"Medir desempenho"};
 static const wchar_t *RECOVER_START[] = {L"Analisar partições", L"Abrir arquivos", L"Reconstruir partições", L"Procurar arquivos", L"Restaurar cartão"};
 
-static int NavY(int slot) { return slot < 5 ? NAV_Y0 + slot * 40 : NAV_Y1 + (slot - 5) * 40; }
+static int NavY(int slot) { return slot < 6 ? NAV_Y0 + slot * 40 : NAV_Y1 + (slot - 6) * 40; }
 
 static COLORREF BtnBg(int id) {
     if (id >= ID_OP0 && id < ID_OP0 + OP_COUNT) return CL_BG;
@@ -545,6 +560,217 @@ static COLORREF MapColor(int c) {
 }
 
 /* painel com o veredito do diagnóstico */
+static int g_resTab = 0; /* 0 = saúde, 1 = conteúdo (aba do Diagnóstico) */
+static void FmtSize(uint64_t b, wchar_t *out, size_t n);
+
+static COLORREF CatColor(int c) {
+    switch (c) {
+    case CT_GAME: return g_pal.accent;
+    case CT_SYS: return RGB(155, 120, 230);
+    case CT_MUSIC: return RGB(76, 175, 120);
+    case CT_VIDEO: return RGB(240, 150, 60);
+    case CT_PHOTO: return RGB(228, 196, 60);
+    case CT_DOC: return RGB(150, 165, 185);
+    case CT_APP: return RGB(224, 110, 150);
+    default: return RGB(120, 120, 120);
+    }
+}
+static const wchar_t *CatName(int c) {
+    static const wchar_t *n[CT_N] = {L"Jogos (ROMs)", L"Sistema e emulador", L"Música", L"Vídeo", L"Fotos", L"Documentos e texto", L"Programas e compactados", L"Outros"};
+    return n[c];
+}
+
+static void DrawRows(HDC dc, int w, int y, int maxY, const wchar_t *const *lab, const wchar_t *const *val, int n) {
+    int lx = S(20), lw = S(190), vx = lx + lw + S(12), vw = w - vx - S(20);
+    for (int i = 0; i < n; i++) {
+        RECT vr = {vx, y, vx + vw, y};
+        HGDIOBJ o = SelectObject(dc, g_fontVal);
+        DrawTextW(dc, val[i], -1, &vr, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+        SelectObject(dc, o);
+        int rh = vr.bottom - vr.top;
+        if (rh < S(18)) rh = S(18);
+        if (y + rh > maxY) rh = maxY - y;
+        if (rh <= 0) break;
+        RECT lr = {lx, y, lx + lw, y + rh};
+        vr.left = vx; vr.right = vx + vw; vr.top = y; vr.bottom = y + rh;
+        Txt(dc, lab[i], &lr, DT_SINGLELINE | DT_NOPREFIX, CL_DIM, g_fontValB);
+        Txt(dc, val[i], &vr, DT_WORDBREAK | DT_NOPREFIX, CL_TXT, g_fontVal);
+        y += rh + S(10);
+    }
+}
+
+static void DrawBanner(HDC dc, int w, int y, int level, const wchar_t *title) {
+    COLORREF lc = level == 0 ? g_pal.ok : (level == 1 ? g_pal.caution : CL_DANGER);
+    COLORREF lb = level == 0 ? g_pal.okBg : (level == 1 ? g_pal.cautionBg : g_pal.warnBg);
+    RECT hb = {S(16), y, w - S(16), y + S(44)};
+    RRect(dc, hb, S(4), lb, CL_NONE);
+    RECT gi = {hb.left + S(12), hb.top, hb.left + S(36), hb.bottom};
+    wchar_t g = level == 0 ? 0xE930 : (level == 1 ? 0xE7BA : 0xEA39);
+    if (g_fontIconM) Glyph(dc, g, &gi, lc, g_fontIconM);
+    else Disc(dc, (gi.left + gi.right) / 2, (hb.top + hb.bottom) / 2, S(6), lc);
+    RECT ti = {hb.left + S(46), hb.top, hb.right - S(12), hb.bottom};
+    Txt(dc, title, &ti, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, CL_TXT, g_fontH);
+}
+
+/* abas do Diagnóstico: Saúde | Conteúdo */
+#define TAB_H 34
+static void TabRects(RECT *a, RECT *b) {
+    *a = (RECT){S(16), S(4), S(16) + S(86), S(4) + S(TAB_H - 6)};
+    *b = (RECT){S(16) + S(94), S(4), S(16) + S(94) + S(100), S(4) + S(TAB_H - 6)};
+}
+static void DrawTabs(HDC dc, int w) {
+    RECT a, b;
+    TabRects(&a, &b);
+    const wchar_t *nm[2] = {L"Saúde", L"Conteúdo"};
+    RECT *rr[2] = {&a, &b};
+    for (int i = 0; i < 2; i++) {
+        BOOL on = (g_resTab == i);
+        Txt(dc, nm[i], rr[i], DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, on ? CL_TXT : CL_DIM, on ? g_fontValB : g_fontVal);
+        if (on) {
+            RECT u = {rr[i]->left + S(10), rr[i]->bottom, rr[i]->right - S(10), rr[i]->bottom + S(2)};
+            Fill(dc, u, CL_NEON);
+        }
+    }
+    RECT sl = {S(16), S(TAB_H), w - S(16), S(TAB_H) + 1};
+    Fill(dc, sl, CL_EDGE);
+}
+
+static void DrawUsage(HDC dc, int w, int h, const Verdict *v, int y0) {
+    DrawBanner(dc, w, y0, 0, v->uTitle);
+    static const wchar_t *lab[4] = {L"Ocupação", L"Extensões mais comuns", L"Tipo de uso", L"Serve para esse uso?"};
+    const wchar_t *val[4] = {v->uOcc, v->uTop, v->uUse, v->uFit};
+    int legTop = h - S(112), barY = legTop - S(24);
+    DrawRows(dc, w, y0 + S(44) + S(12), barY - S(8), lab, val, 4);
+
+    /* barra de ocupação: cartão inteiro = largura total */
+    int bx = S(20), bw = w - S(40), bh = S(14);
+    RECT back = {bx, barY, bx + bw, barY + bh};
+    Fill(dc, back, g_pal.btnEdge);
+    double cap = (double)(v->uCard ? v->uCard : 1);
+    int x = bx;
+    for (int c = 0; c < CT_N; c++) {
+        if (v->us.catBytes[c] == 0) continue;
+        int sw = (int)((double)bw * (double)v->us.catBytes[c] / cap);
+        if (sw < 1) sw = 1;
+        if (x + sw > bx + bw) sw = bx + bw - x;
+        if (sw <= 0) break;
+        RECT sg = {x, barY, x + sw, barY + bh};
+        Fill(dc, sg, CatColor(c));
+        x += sw;
+    }
+    uint64_t freeIn = v->us.scannedBytes > v->us.usedBytes ? v->us.scannedBytes - v->us.usedBytes : 0;
+    int fw = (int)((double)bw * (double)freeIn / cap);
+    if (fw > 0 && x + fw > bx + bw) fw = bx + bw - x;
+    if (fw > 0) {
+        RECT sg = {x, barY, x + fw, barY + bh};
+        Fill(dc, sg, g_pal.empty);
+    }
+
+    /* legenda em 2 colunas */
+    int col = 0, row = 0;
+    HGDIOBJ o = SelectObject(dc, g_fontSmall);
+    SelectObject(dc, o);
+    int colW = (w - S(40)) / 2;
+    struct { COLORREF c; wchar_t t[96]; } it[CT_N + 2];
+    int n = 0;
+    for (int c = 0; c < CT_N; c++) {
+        if (v->us.catFiles[c] == 0) continue;
+        wchar_t sz[32];
+        FmtSize(v->us.catBytes[c], sz, 32);
+        it[n].c = CatColor(c);
+        _snwprintf(it[n].t, 95, L"%ls  %ls · %u arq.", CatName(c), sz, (unsigned)v->us.catFiles[c]);
+        it[n].t[95] = 0;
+        n++;
+    }
+    {
+        wchar_t sz[32];
+        FmtSize(freeIn, sz, 32);
+        it[n].c = g_pal.empty;
+        _snwprintf(it[n].t, 95, L"Livre nas partições  %ls", sz);
+        it[n].t[95] = 0;
+        n++;
+        if (v->uCard > v->us.scannedBytes + 64u * 1024 * 1024) {
+            FmtSize(v->uCard - v->us.scannedBytes, sz, 32);
+            it[n].c = g_pal.btnEdge;
+            _snwprintf(it[n].t, 95, L"Fora das partições  %ls", sz);
+            it[n].t[95] = 0;
+            n++;
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        col = i / 5; row = i % 5;
+        if (col > 1) break;
+        int lx = S(20) + col * colW, ly = legTop + row * S(20);
+        RECT sq = {lx, ly + S(4), lx + S(10), ly + S(14)};
+        Fill(dc, sq, it[i].c);
+        RECT tr = {lx + S(16), ly, lx + colW - S(6), ly + S(18)};
+        Txt(dc, it[i].t, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, CL_TXT, g_fontSmall);
+    }
+}
+
+static void DrawCurve(HDC dc, RECT r, const float *c, int n, float vmax, COLORREF col) {
+    if (n < 2 || vmax <= 0) return;
+    HPEN pen = CreatePen(PS_SOLID, S(2) > 1 ? S(2) : 1, col);
+    HGDIOBJ op = SelectObject(dc, pen);
+    for (int i = 0; i < n; i++) {
+        int x = r.left + (r.right - r.left) * i / (n - 1);
+        float vv = c[i] > vmax ? vmax : c[i];
+        int y = r.bottom - (int)((double)(r.bottom - r.top) * vv / vmax);
+        if (i == 0) MoveToEx(dc, x, y, NULL);
+        else LineTo(dc, x, y);
+    }
+    SelectObject(dc, op);
+    DeleteObject(pen);
+}
+
+/* barras das 4 medidas + curva de velocidade durante o teste */
+static void DrawBenchChart(HDC dc, int w, int top, int h, const Verdict *v) {
+    RECT sl = {S(20), top, w - S(20), top + 1};
+    Fill(dc, sl, CL_EDGE);
+    static const wchar_t *nm[4] = {L"Leitura sequencial", L"Gravação sequencial", L"Leitura 4 KB", L"Gravação 4 KB"};
+    double val[4] = {v->br.seqR, v->br.hasW ? v->br.seqW : -1, v->br.rr, v->br.hasW ? v->br.rw : -1};
+    double ref[4] = {90, 90, 2000, 1000};
+    const wchar_t *un[4] = {L"MB/s", L"MB/s", L"ops/s", L"ops/s"};
+    int lx = S(20), labW = S(150), bx = lx + labW, bwMax = S(150), by = top + S(14);
+    for (int i = 0; i < 4; i++) {
+        int y = by + i * S(26);
+        RECT lr = {lx, y, lx + labW, y + S(18)};
+        Txt(dc, nm[i], &lr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX, CL_DIM, g_fontSmall);
+        RECT bk = {bx, y + S(3), bx + bwMax, y + S(15)};
+        Fill(dc, bk, g_pal.btnEdge);
+        wchar_t t[48];
+        if (val[i] < 0) {
+            wcscpy(t, L"não testado");
+        } else {
+            double f = val[i] / ref[i];
+            if (f > 1) f = 1;
+            RECT fl = {bx, y + S(3), bx + (int)(bwMax * f) + 1, y + S(15)};
+            Fill(dc, fl, i < 2 ? CL_NEON : CatColor(CT_VIDEO));
+            _snwprintf(t, 47, L"%.0f %ls", val[i], un[i]);
+            t[47] = 0;
+        }
+        RECT tr = {bx + bwMax + S(8), y, bx + bwMax + S(100), y + S(18)};
+        Txt(dc, t, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX, CL_TXT, g_fontSmall);
+    }
+    /* curva */
+    int cx = bx + bwMax + S(120);
+    RECT cr = {cx, top + S(24), w - S(24), top + h - S(18)};
+    RECT cap = {cx, top + S(6), w - S(20), top + S(22)};
+    Txt(dc, L"Velocidade durante o teste (MB/s)", &cap, DT_SINGLELINE | DT_NOPREFIX, CL_DIM, g_fontSmall);
+    RECT bk = {cr.left, cr.top, cr.right, cr.bottom};
+    RRect(dc, bk, S(3), g_pal.input, CL_EDGE);
+    float vmax = 10;
+    for (int i = 0; i < v->nCurveR; i++) if (v->curveR[i] > vmax) vmax = v->curveR[i];
+    for (int i = 0; i < v->nCurveW; i++) if (v->curveW[i] > vmax) vmax = v->curveW[i];
+    RECT in = {cr.left + S(4), cr.top + S(4), cr.right - S(4), cr.bottom - S(4)};
+    DrawCurve(dc, in, v->curveR, v->nCurveR, vmax, CL_NEON);
+    DrawCurve(dc, in, v->curveW, v->nCurveW, vmax, CatColor(CT_VIDEO));
+    RECT lg1 = {cr.left, cr.bottom + S(2), cr.left + S(90), cr.bottom + S(18)};
+    RECT lg2 = {cr.left + S(96), cr.bottom + S(2), cr.left + S(200), cr.bottom + S(18)};
+    Txt(dc, L"— leitura", &lg1, DT_SINGLELINE | DT_NOPREFIX, CL_NEON, g_fontSmall);
+    Txt(dc, L"— gravação", &lg2, DT_SINGLELINE | DT_NOPREFIX, CatColor(CT_VIDEO), g_fontSmall);
+}
+
 static void DrawResult(DRAWITEMSTRUCT *d) {
     int w = d->rcItem.right - d->rcItem.left, h = d->rcItem.bottom - d->rcItem.top;
     HDC dc = CreateCompatibleDC(d->hDC);
@@ -557,78 +783,86 @@ static void DrawResult(DRAWITEMSTRUCT *d) {
     if (!v->valid || v->op != g_op) {
         RECT tr = {S(24), 0, w - S(24), h};
         Txt(dc, g_op == OP_CSD ? L"Escolha como acessar o cartão e clique em Ler proteção. O resultado aparece aqui."
-                               : L"Escolha o cartão e clique em Analisar cartão. O resultado aparece aqui.", &tr,
+                : g_op == OP_BENCH ? L"Escolha o cartão e clique em Medir desempenho. O resultado aparece aqui."
+                                   : L"Escolha o cartão e clique em Analisar cartão. O resultado aparece aqui.", &tr,
             DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, CL_DIM, g_font);
     } else {
-        COLORREF lc = v->level == 0 ? g_pal.ok : (v->level == 1 ? g_pal.caution : CL_DANGER);
-        COLORREF lb = v->level == 0 ? g_pal.okBg : (v->level == 1 ? g_pal.cautionBg : g_pal.warnBg);
-        RECT hb = {S(16), S(16), w - S(16), S(60)};
-        RRect(dc, hb, S(4), lb, CL_NONE);
-        RECT gi = {hb.left + S(12), hb.top, hb.left + S(36), hb.bottom};
-        wchar_t g = v->level == 0 ? 0xE930 : (v->level == 1 ? 0xE7BA : 0xEA39);
-        if (g_fontIconM) Glyph(dc, g, &gi, lc, g_fontIconM);
-        else Disc(dc, (gi.left + gi.right) / 2, (hb.top + hb.bottom) / 2, S(6), lc);
-        RECT ti = {hb.left + S(46), hb.top, hb.right - S(12), hb.bottom};
-        Txt(dc, v->title, &ti, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, CL_TXT, g_fontH);
-
-        static const wchar_t *lab[4] = {L"Causa provável", L"O cartão tem conserto?", L"Dá para salvar os dados?", L"O que fazer agora"};
-        const wchar_t *val[4] = {v->cause, v->card, v->data, v->todo};
-        int mapTop = v->map ? h - S(70) : h - S(10);
-        int y = hb.bottom + S(14), lx = S(20), lw = S(190), vx = lx + lw + S(12), vw = w - vx - S(20);
-        for (int i = 0; i < 4; i++) {
-            RECT vr = {vx, y, vx + vw, y};
-            HGDIOBJ o = SelectObject(dc, g_fontVal);
-            DrawTextW(dc, val[i], -1, &vr, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
-            SelectObject(dc, o);
-            int rh = vr.bottom - vr.top;
-            if (rh < S(18)) rh = S(18);
-            if (y + rh > mapTop - S(6)) rh = mapTop - S(6) - y;
-            if (rh <= 0) break;
-            RECT lr = {lx, y, lx + lw, y + rh};
-            vr.left = vx; vr.right = vx + vw; vr.top = y; vr.bottom = y + rh;
-            Txt(dc, lab[i], &lr, DT_SINGLELINE | DT_NOPREFIX, CL_DIM, g_fontValB);
-            Txt(dc, val[i], &vr, DT_WORDBREAK | DT_NOPREFIX, CL_TXT, g_fontVal);
-            y += rh + S(10);
-        }
-
-        /* mapa de leitura */
-        if (v->map) {
-        RECT sl = {S(20), mapTop, w - S(20), mapTop + 1};
-        Fill(dc, sl, CL_EDGE);
-        RECT ml = {S(20), mapTop + S(10), w - S(20), mapTop + S(26)};
-        Txt(dc, L"Mapa de leitura: 128 pontos do início ao fim do cartão", &ml, DT_SINGLELINE | DT_NOPREFIX, CL_DIM, g_fontSmall);
-        int bx = S(20), bw = w - S(40), by = mapTop + S(30), bh = S(10);
-        for (int i = 0; i < MAP_N; i++) {
-            RECT c = {bx + bw * i / MAP_N, by, bx + bw * (i + 1) / MAP_N, by + bh};
-            if (c.right - c.left > 3) c.right -= 1;
-            Fill(dc, c, MapColor(v->cell[i]));
-        }
-        static const wchar_t *ln[5] = {L"Com dados", L"Vazio", L"Lento", L"Ilegível", L"Não lido"};
-        int cnt[5] = {v->nData, v->nEmpty, v->nSlow, v->nBad, v->nSkip};
-        int lx2 = S(20), ly = by + bh + S(8);
-        HGDIOBJ o = SelectObject(dc, g_fontSmall);
-        for (int i = 0; i < 5; i++) {
-            if (i == MC_SKIP && cnt[i] == 0) continue;
-            wchar_t s[48];
-            _snwprintf(s, 47, L"%ls %d", ln[i], cnt[i]);
-            s[47] = 0;
-            RECT sq = {lx2, ly + S(3), lx2 + S(10), ly + S(13)};
-            Fill(dc, sq, MapColor(i));
-            SIZE ts;
-            GetTextExtentPoint32W(dc, s, (int)wcslen(s), &ts);
-            RECT tr = {lx2 + S(15), ly, lx2 + S(15) + ts.cx + 2, ly + S(16)};
-            SetTextColor(dc, CL_DIM);
-            SetBkMode(dc, TRANSPARENT);
-            DrawTextW(dc, s, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-            lx2 = tr.right + S(22);
-        }
-        SelectObject(dc, o);
+        BOOL tabs = (v->op == OP_DIAG && v->usage);
+        int y0 = S(16);
+        if (tabs) { DrawTabs(dc, w); y0 = S(TAB_H) + S(12); }
+        if (tabs && g_resTab == 1) {
+            DrawUsage(dc, w, h, v, y0);
+        } else {
+            DrawBanner(dc, w, y0, v->level, v->title);
+            static const wchar_t *lab[4] = {L"Causa provável", L"O cartão tem conserto?", L"Dá para salvar os dados?", L"O que fazer agora"};
+            static const wchar_t *labB[4] = {L"Velocidade medida", L"Acesso aleatório (4 KB)", L"Classe estimada", L"Serve para"};
+            const wchar_t *val[4] = {v->cause, v->card, v->data, v->todo};
+            int mapTop = v->bench ? h - S(150) : (v->map ? h - S(70) : h - S(10));
+            DrawRows(dc, w, y0 + S(44) + S(14), mapTop - S(6), v->bench ? labB : lab, val, 4);
+            if (v->bench) DrawBenchChart(dc, w, mapTop, S(150), v);
+            /* mapa de leitura */
+            if (v->map) {
+                RECT sl = {S(20), mapTop, w - S(20), mapTop + 1};
+                Fill(dc, sl, CL_EDGE);
+                RECT ml = {S(20), mapTop + S(10), w - S(20), mapTop + S(26)};
+                Txt(dc, L"Mapa de leitura: 128 pontos do início ao fim do cartão", &ml, DT_SINGLELINE | DT_NOPREFIX, CL_DIM, g_fontSmall);
+                int bx = S(20), bw = w - S(40), by = mapTop + S(30), bh = S(10);
+                for (int i = 0; i < MAP_N; i++) {
+                    RECT c = {bx + bw * i / MAP_N, by, bx + bw * (i + 1) / MAP_N, by + bh};
+                    if (c.right - c.left > 3) c.right -= 1;
+                    Fill(dc, c, MapColor(v->cell[i]));
+                }
+                static const wchar_t *ln[5] = {L"Com dados", L"Vazio", L"Lento", L"Ilegível", L"Não lido"};
+                int cnt[5] = {v->nData, v->nEmpty, v->nSlow, v->nBad, v->nSkip};
+                int lx2 = S(20), ly = by + bh + S(8);
+                HGDIOBJ o = SelectObject(dc, g_fontSmall);
+                for (int i = 0; i < 5; i++) {
+                    if (i == MC_SKIP && cnt[i] == 0) continue;
+                    wchar_t s[48];
+                    _snwprintf(s, 47, L"%ls %d", ln[i], cnt[i]);
+                    s[47] = 0;
+                    RECT sq = {lx2, ly + S(3), lx2 + S(10), ly + S(13)};
+                    Fill(dc, sq, MapColor(i));
+                    SIZE ts;
+                    GetTextExtentPoint32W(dc, s, (int)wcslen(s), &ts);
+                    RECT tr = {lx2 + S(15), ly, lx2 + S(15) + ts.cx + 2, ly + S(16)};
+                    SetTextColor(dc, CL_DIM);
+                    SetBkMode(dc, TRANSPARENT);
+                    DrawTextW(dc, s, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+                    lx2 = tr.right + S(22);
+                }
+                SelectObject(dc, o);
+            }
         }
     }
     BitBlt(d->hDC, d->rcItem.left, d->rcItem.top, w, h, dc, 0, 0, SRCCOPY);
     SelectObject(dc, ob);
     DeleteObject(bm);
     DeleteDC(dc);
+}
+
+/* clique nas abas do resultado */
+static LRESULT CALLBACK ResSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR ref) {
+    (void)ref;
+    BOOL tabsOn = (g_vd.valid && g_vd.op == OP_DIAG && g_vd.usage && g_op == OP_DIAG);
+    if (m == WM_NCHITTEST) return HTCLIENT;
+    if (m == WM_SETCURSOR && tabsOn) {
+        POINT pt;
+        GetCursorPos(&pt);
+        ScreenToClient(h, &pt);
+        RECT a, b;
+        TabRects(&a, &b);
+        if (PtInRect(&a, pt) || PtInRect(&b, pt)) { SetCursor(LoadCursor(NULL, IDC_HAND)); return TRUE; }
+    }
+    if (m == WM_LBUTTONDOWN && tabsOn) {
+        POINT pt = {(short)LOWORD(l), (short)HIWORD(l)};
+        RECT a, b;
+        TabRects(&a, &b);
+        int t = PtInRect(&a, pt) ? 0 : (PtInRect(&b, pt) ? 1 : -1);
+        if (t >= 0 && t != g_resTab) { g_resTab = t; InvalidateRect(h, NULL, FALSE); }
+        return 0;
+    }
+    return DefSubclassProc(h, m, w, l);
 }
 
 static LRESULT CALLBACK BtnSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR ref) {
@@ -1718,6 +1952,146 @@ static void VSet(wchar_t *dst, size_t n, const wchar_t *fmt, ...) {
 }
 #define VS(field, ...) VSet(v->field, sizeof v->field / sizeof(wchar_t), __VA_ARGS__)
 
+/* ---------------------------------------------------- conteúdo do cartão (aba "Conteúdo") */
+typedef struct { BOOL valid; int disk; uint64_t size; BenchRes br; BenchJudge bj; } BenchMem;
+static BenchMem g_bm; /* última medição de desempenho (usada para dizer se o cartão serve para o uso encontrado) */
+
+static void FmtNum(double v, int dec, wchar_t *out, size_t n) {
+    _snwprintf(out, n - 1, dec ? L"%.1f" : L"%.0f", v);
+    out[n - 1] = 0;
+    for (wchar_t *c = out; *c; c++) if (*c == L'.') *c = L',';
+}
+
+static int UsTickCb(void *c, const UsageStat *u) {
+    wchar_t ph[160];
+    (void)c;
+    _snwprintf(ph, 159, L"Lendo o conteúdo — %u arquivos, %u pastas", (unsigned)u->files, (unsigned)u->dirs);
+    ph[159] = 0;
+    SetPhaseText(ph);
+    return g_cancel ? 1 : 0;
+}
+
+static const wchar_t *ProfileTitle(int p) {
+    static const wchar_t *t[] = {L"Cartão quase vazio", L"Cartão de console ou game stick (sistema e jogos)", L"Sistema Linux de placa ou console",
+                                 L"Cartão de jogos e emulação", L"Cartão de câmera (fotos e vídeos)", L"Cartão de vídeos", L"Cartão de músicas",
+                                 L"Cartão de documentos", L"Uso misto, sem um tipo dominante"};
+    return t[p];
+}
+
+static void BuildUsageText(Verdict *v) {
+    UsageStat *u = &v->us;
+    wchar_t a[32], b[32], tmp[160];
+    FmtSize(u->usedBytes, a, 32);
+    FmtSize(v->uCard, b, 32);
+    int pct = v->uCard ? (int)(u->usedBytes * 100 / v->uCard) : 0;
+    VS(uOcc, L"%ls de %ls (%d%%) em %u arquivos e %u pastas.%ls%ls", a, b, pct, (unsigned)u->files, (unsigned)u->dirs,
+       u->partial ? L" Leitura parcial." : L"", u->skippedParts ? L" Há partições que o app não abre (NTFS, criptografada ou desconhecida); o conteúdo delas não entrou na conta." : L"");
+    /* extensões */
+    v->uTop[0] = 0;
+    int nshow = 0;
+    for (int i = 0; i < u->next && nshow < 8; i++) {
+        wchar_t sz[32];
+        FmtSize(u->ext[i].bytes, sz, 32);
+        _snwprintf(tmp, 159, L"%ls.%hs (%u · %ls)", nshow ? L"   " : L"", u->ext[i].ext, (unsigned)u->ext[i].files, sz);
+        tmp[159] = 0;
+        if (wcslen(v->uTop) + wcslen(tmp) < 395) wcscat(v->uTop, tmp);
+        nshow++;
+    }
+    if (!nshow) wcscpy(v->uTop, L"Nenhum arquivo com extensão encontrado.");
+    /* tipo de uso */
+    int idx[CT_N];
+    for (int i = 0; i < CT_N; i++) idx[i] = i;
+    for (int i = 0; i < CT_N; i++)
+        for (int k = i + 1; k < CT_N; k++)
+            if (u->catBytes[idx[k]] > u->catBytes[idx[i]]) { int t = idx[i]; idx[i] = idx[k]; idx[k] = t; }
+    v->uUse[0] = 0;
+    double tot = (double)u->usedBytes;
+    for (int i = 0; i < 3 && tot > 0; i++) {
+        if (u->catBytes[idx[i]] == 0) break;
+        _snwprintf(tmp, 159, L"%ls%ls %d%%", i ? L", " : L"", CatName(idx[i]), (int)((double)u->catBytes[idx[i]] * 100.0 / tot + 0.5));
+        tmp[159] = 0;
+        wcscat(v->uUse, tmp);
+    }
+    if (v->uUse[0]) wcscat(v->uUse, L". ");
+    if (u->hasRoms) wcscat(v->uUse, L"Tem pasta de ROMs. ");
+    if (u->hasEmu) wcscat(v->uUse, L"Tem pasta de emulador (RetroArch, BIOS, saves...). ");
+    if (u->hasLinux) wcscat(v->uUse, L"Tem sistema Linux (partição ext4). ");
+    if (u->hasDcim) wcscat(v->uUse, L"Tem pasta de câmera (DCIM). ");
+    if (u->hasMusicDir) wcscat(v->uUse, L"Tem pasta de música. ");
+}
+
+/* "serve para esse uso?" junta o perfil, o diagnóstico de saúde e (se houver) a medição de desempenho */
+static void BuildFitText(Verdict *v, int disk, uint64_t size) {
+    int p = v->uProfile;
+    BOOL bm = g_bm.valid && g_bm.disk == disk && g_bm.size == size;
+    wchar_t t[520] = L"", x[64];
+    if (v->level >= 2) wcscat(t, L"Não. O diagnóstico encontrou um defeito grave (veja a aba Saúde); use o cartão só para ler e copiar os dados. ");
+    else if (v->level == 1) wcscat(t, L"Com ressalvas: o diagnóstico encontrou um problema (veja a aba Saúde). ");
+    if (p == UP_GAMES || p == UP_CONSOLE) {
+        if (bm) {
+            FmtNum(g_bm.br.seqR, 0, x, 64);
+            if (g_bm.bj.game == 2) { wcscat(t, L"Sim para jogos. Leitura de "); wcscat(t, x); wcscat(t, L" MB/s e acesso aleatório rápido."); }
+            else if (g_bm.bj.game == 1) { wcscat(t, L"Serve para jogos leves (8 e 16 bits). Pode travar em jogos pesados (PSP, Dreamcast...). Leitura de "); wcscat(t, x); wcscat(t, L" MB/s."); }
+            else wcscat(t, L"Fraco para jogos: a leitura ou o acesso aleatório é lento e causa travadas e demora para carregar.");
+        } else wcscat(t, L"Jogos pedem leitura rápida e acesso aleatório bom. Rode Desempenho (menu à esquerda) para confirmar.");
+    } else if (p == UP_CAMERA || p == UP_VIDEO) {
+        if (bm && g_bm.bj.media >= 0) {
+            FmtNum(g_bm.br.seqW, 0, x, 64);
+            if (g_bm.bj.media >= 3) { wcscat(t, L"Sim, inclusive vídeo 4K. Gravação de "); wcscat(t, x); wcscat(t, L" MB/s."); }
+            else if (g_bm.bj.media == 2) { wcscat(t, L"Sim para fotos e vídeo Full HD; não para 4K. Gravação de "); wcscat(t, x); wcscat(t, L" MB/s."); }
+            else if (g_bm.bj.media == 1) { wcscat(t, L"Só para fotos e vídeo básico. Gravação de "); wcscat(t, x); wcscat(t, L" MB/s."); }
+            else wcscat(t, L"Não: a gravação é lenta demais e a câmera vai parar ou perder quadros.");
+        } else wcscat(t, L"Câmera pede gravação contínua (Full HD: 10 MB/s; 4K: 30 MB/s). Rode Desempenho com o teste de gravação para confirmar.");
+    } else if (p == UP_MUSIC || p == UP_DOCS) {
+        if (bm && g_bm.bj.trust == BT_BAD) wcscat(t, L"Funciona para ler, mas a medição mostrou instabilidade: não confie nele para guardar arquivos únicos.");
+        else wcscat(t, L"Sim. Esse uso pede pouco; qualquer cartão sem defeito serve.");
+    } else {
+        if (bm) wcscat(t, g_bm.bj.trust == BT_OK ? L"Desempenho dentro do esperado para uso geral." : L"A medição mostrou desempenho irregular: use só para dados que você possa perder.");
+        else wcscat(t, L"Sem uso definido. Rode Desempenho para saber para que o cartão presta.");
+    }
+    VS(uFit, L"%ls", t);
+}
+
+static void ScanContent(Job *j, HANDLE hd, Verdict *v) {
+    Dev2 d;
+    Diag *g = (Diag *)calloc(1, sizeof *g);
+    if (!g) return;
+    if (!Dev2Init(&d, StrictRd, hd, j->srcSize, j->srcSec ? j->srcSec : 512)) { free(g); return; }
+    SetIndet(L"Lendo o conteúdo do cartão...");
+    DiagAnalyze(&d, g, 0, NULL, NULL);
+    UsageStat *u = &v->us;
+    memset(u, 0, sizeof *u);
+    for (int i = 0; i < g->nparts && !g_cancel; i++) {
+        Part *p = &g->parts[i];
+        if (p->flags & PF_EXTENDED) continue;
+        if (p->start >= j->srcSize) continue;
+        if (!FsBrowsable(p->fs)) {
+            if (p->fs == FST_NTFS || p->fs == FST_BITLOCKER || p->fs == FST_LUKS) u->skippedParts++;
+            continue;
+        }
+        UsageScanPart(&d, p->start, p->size, u, UsTickCb, NULL);
+    }
+    if (g_cancel) u->partial = 1;
+    if (u->scannedParts > 0) {
+        UsageSortExt(u);
+        v->usage = TRUE;
+        v->uCard = j->srcSize;
+        v->uProfile = UsageProfile(u);
+        VS(uTitle, L"%ls", ProfileTitle(v->uProfile));
+        BuildUsageText(v);
+        wchar_t a[32];
+        FmtSize(u->usedBytes, a, 32);
+        Log(L"Conteúdo: %ls em %u arquivos e %u pastas. Perfil: %ls.", a, (unsigned)u->files, (unsigned)u->dirs, v->uTitle);
+        for (int c = 0; c < CT_N; c++)
+            if (u->catFiles[c]) {
+                FmtSize(u->catBytes[c], a, 32);
+                Log(L"  %ls: %u arquivos, %ls", CatName(c), (unsigned)u->catFiles[c], a);
+            }
+    } else Log(L"Conteúdo: nenhuma partição com sistema de arquivos legível (FAT, exFAT ou ext).");
+    Dev2Free(&d);
+    free(g);
+}
+
 static BOOL DoHealth(Job *j) {
     Verdict *v = &g_vd;
     memset(v, 0, sizeof *v);
@@ -1833,6 +2207,10 @@ static BOOL DoHealth(Job *j) {
     } else if (opened && !j->verify)
         Log(L"Teste de gravação desmarcado.");
 
+    /* conteúdo do cartão: ocupação, tipos de arquivo e perfil de uso */
+    if (opened && readable > 0 && !g_cancel) ScanContent(j, hd, v);
+    if (g_cancel) { Log(L"Diagnóstico cancelado."); goto out; }
+
     /* registro CID (só leitores SD internos expõem) */
     {
         SdId ids[4];
@@ -1941,6 +2319,8 @@ static BOOL DoHealth(Job *j) {
         VS(data, L"Não há sinal de perda de dados.");
         VS(todo, L"Para saber se a capacidade é real, use Autenticidade com o teste completo.%ls%ls", capNote, wr < 0 ? L" O teste de gravação não foi feito." : L"");
     }
+    if (v->usage) BuildFitText(v, j->src, size);
+    g_resTab = 0;
     Log(L"Resultado: %ls.", v->title);
     v->valid = TRUE;
 out:
@@ -1951,6 +2331,280 @@ out:
     if (pat) FREE_ALIGNED(pat);
     if (rb) FREE_ALIGNED(rb);
     return v->valid;
+}
+
+/* ------------------------------------------------------------ desempenho (benchmark)
+ * Leitura: sequencial em 3 regiões (início, meio, fim) e 4 KB aleatório, sem cache do Windows.
+ * Gravação (opcional): usa 32 MB no meio do cartão. O conteúdo original é copiado para a memória antes
+ * e devolvido (e conferido) no fim, mesmo se o teste for cancelado ou falhar. */
+static void FillPat(uint8_t *p, DWORD n, uint32_t seed) {
+    uint64_t x = 0x9E3779B97F4A7C15ull ^ ((uint64_t)seed * 0xBF58476D1CE4E5B9ull);
+    if (!x) x = 1;
+    for (DWORD i = 0; i + 8 <= n; i += 8) {
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        memcpy(p + i, &x, 8);
+    }
+}
+static int CmpDbl(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return x < y ? -1 : (x > y);
+}
+static uint32_t g_rng = 1;
+static uint32_t Rnd32(void) { g_rng = g_rng * 1664525u + 1013904223u; return g_rng >> 8 | (g_rng << 24); }
+static uint64_t Rnd64(void) { return ((uint64_t)Rnd32() << 32) ^ Rnd32() ^ ((uint64_t)Rnd32() << 11); }
+static const wchar_t *QW(int q) { return q == BQ_GOOD ? L"bom" : (q == BQ_FAIR ? L"médio" : L"fraco"); }
+
+static BOOL DoBench(Job *j) {
+    Verdict *v = &g_vd;
+    memset(v, 0, sizeof *v);
+    v->op = OP_BENCH;
+    v->bench = TRUE;
+    BenchRes *br = &v->br;
+    const DWORD blk = 1024 * 1024, REG = 32u * 1024 * 1024;
+    uint32_t sec = j->srcSec ? j->srcSec : 512;
+    DWORD tl = sec > 4096 ? sec : 4096;
+    uint64_t size = j->srcSize;
+    HANDLE hd = INVALID_HANDLE_VALUE, hw = INVALID_HANDLE_VALUE;
+    VolSet vs;
+    memset(&vs, 0, sizeof vs);
+    BOOL locked = FALSE, touched = FALSE, done = FALSE;
+    uint8_t *buf = (uint8_t *)ALLOC_ALIGNED(blk), *pat = (uint8_t *)ALLOC_ALIGNED(blk), *rb = (uint8_t *)ALLOC_ALIGNED(blk), *save = NULL;
+    uint64_t wOff = 0;
+    DWORD wLen = 0;
+    wchar_t sz[32];
+    FmtSize(size, sz, 32);
+    if (!buf || !pat || !rb) { Log(L"ERRO: memória insuficiente."); goto out; }
+    if (blk % sec) { Log(L"ERRO: tamanho de setor sem suporte (%u).", sec); goto out; }
+    if (size < 64ull * 1024 * 1024) { Log(L"O cartão é pequeno demais (%ls) para medir desempenho.", sz); goto out; }
+    Log(L"Desempenho do Disco %d: %ls, setor de %u bytes.", j->src, sz, sec);
+    hd = OpenDisk(j->src, FALSE);
+    if (hd == INVALID_HANDLE_VALUE) { LogErr(L"abrir o cartão"); goto out; }
+    if (!DiskLenMatches(hd, size)) { Log(L"ERRO: o tamanho do disco mudou. Atualize a lista."); goto out; }
+
+    /* 1. leitura sequencial em 3 regiões */
+    {
+        uint64_t span = 48ull * 1024 * 1024;
+        if (span > size / 8) span = size / 8;
+        span -= span % blk;
+        uint64_t starts[3] = {0, size / 2, size - span - blk};
+        double regR[3];
+        int nreg = 0;
+        double totB = 0, totT = 0;
+        SetPhase(L"Medindo a leitura sequencial...", 3 * span);
+        for (int r = 0; r < 3; r++) {
+            uint64_t off0 = starts[r] - starts[r] % blk;
+            double rbytes = 0, rt = 0, winB = 0, winT = 0, tS = NowSec();
+            for (uint64_t k = 0; k < span / blk; k++) {
+                if (g_cancel) goto out;
+                double t0 = NowSec();
+                BOOL ok = ReadAtRaw(hd, off0 + k * blk, buf, blk);
+                double dt = NowSec() - t0;
+                if (!ok) { if (++br->rErr > 8) break; continue; }
+                rbytes += blk; rt += dt; winB += blk; winT += dt;
+                g_done += blk;
+                if ((k & 3) == 3) {
+                    if (winT > 0 && v->nCurveR < 64) v->curveR[v->nCurveR++] = (float)(winB / 1048576.0 / winT);
+                    winB = winT = 0;
+                }
+                if (NowSec() - tS > 6.0) break;
+            }
+            if (rt > 0) regR[nreg++] = rbytes / 1048576.0 / rt;
+            totB += rbytes; totT += rt;
+        }
+        if (totT > 0) br->seqR = totB / 1048576.0 / totT;
+        if (nreg > 0) {
+            br->rMin = br->rMax = regR[0];
+            for (int i = 1; i < nreg; i++) { if (regR[i] < br->rMin) br->rMin = regR[i]; if (regR[i] > br->rMax) br->rMax = regR[i]; }
+        }
+        Log(L"Leitura sequencial: %.1f MB/s (regiões: %d).", br->seqR, nreg);
+    }
+
+    /* 2. leitura aleatória de 4 KB */
+    {
+        SetPhase(L"Medindo o acesso aleatório (leitura)...", 600);
+        g_rng = 2463534242u ^ (uint32_t)size;
+        int n = 0;
+        double t0 = NowSec(), el = 0;
+        while (n < 600) {
+            if (g_cancel) goto out;
+            uint64_t o = Rnd64() % (size - tl);
+            o -= o % tl;
+            if (!ReadAtRaw(hd, o, buf, tl)) { if (++br->rErr > 8) break; }
+            n++;
+            g_done++;
+            el = NowSec() - t0;
+            if (el > 6.0) break;
+        }
+        if (el > 0) br->rr = n / el;
+        Log(L"Leitura aleatória de 4 KB: %.0f operações/s.", br->rr);
+    }
+
+    /* 3. gravação (opcional) */
+    if (j->verify && !g_cancel) {
+        if (!LockDiskVolumes(j->src, &vs)) {
+            Log(L"Aviso: não foi possível travar as partições do cartão; o teste de gravação foi pulado. Feche programas que usam o cartão.");
+        } else {
+            locked = TRUE;
+            hw = OpenDisk(j->src, TRUE);
+            if (hw == INVALID_HANDLE_VALUE) LogErr(L"abrir o cartão para gravação");
+        }
+        if (hw != INVALID_HANDLE_VALUE) {
+            wLen = REG;
+            wOff = (size - wLen) / 2;
+            wOff -= wOff % blk;
+            save = (uint8_t *)ALLOC_ALIGNED(wLen);
+            BOOL saved = save != NULL;
+            if (!saved) Log(L"Aviso: memória insuficiente para o teste de gravação; pulado.");
+            SetPhase(L"Guardando o conteúdo original da área de teste...", wLen);
+            for (DWORD k = 0; saved && k < wLen / blk; k++) {
+                if (g_cancel) goto out;
+                if (!ReadAtRaw(hw, wOff + (uint64_t)k * blk, save + (uint64_t)k * blk, blk)) { saved = FALSE; Log(L"Aviso: a área de teste não pôde ser lida; gravação pulada."); }
+                g_done += blk;
+            }
+            if (saved) {
+                touched = TRUE;
+                uint32_t nblk = wLen / blk, nW = 0;
+                double wb = 0, wt = 0, winB = 0, winT = 0, wins[64];
+                int nwin = 0;
+                double tS = NowSec();
+                SetPhase(L"Medindo a gravação sequencial...", wLen);
+                g_done = 0;
+                for (uint32_t k = 0; k < nblk; k++) {
+                    if (g_cancel) goto out;
+                    FillPat(pat, blk, k + 1);
+                    double t0 = NowSec();
+                    BOOL ok = WriteAtRaw(hw, wOff + (uint64_t)k * blk, pat, blk);
+                    double dt = NowSec() - t0;
+                    if (!ok) { br->wErr++; SetLastError(GetLastError()); LogErr(L"gravar na área de teste"); break; }
+                    nW++; wb += blk; wt += dt; winB += blk; winT += dt;
+                    g_done += blk;
+                    if ((k & 1) == 1) {
+                        if (winT > 0) {
+                            double sp = winB / 1048576.0 / winT;
+                            if (nwin < 64) wins[nwin++] = sp;
+                            if (v->nCurveW < 64) v->curveW[v->nCurveW++] = (float)sp;
+                        }
+                        winB = winT = 0;
+                    }
+                    if (NowSec() - tS > 10.0) break;
+                }
+                FlushFileBuffers(hw);
+                if (wt > 0 && nW >= 4) {
+                    br->hasW = 1;
+                    br->seqW = wb / 1048576.0 / wt;
+                    if (nwin > 0) {
+                        double tmp[64];
+                        memcpy(tmp, wins, sizeof(double) * (size_t)nwin);
+                        qsort(tmp, (size_t)nwin, sizeof(double), CmpDbl);
+                        br->wMin = tmp[0];
+                        br->wMed = tmp[nwin / 2];
+                    }
+                    Log(L"Gravação sequencial: %.1f MB/s (mínima %.1f MB/s).", br->seqW, br->wMin);
+                    /* confere o que foi gravado */
+                    int bad = 0;
+                    for (uint32_t k = 0; k < nW && !g_cancel; k++) {
+                        FillPat(pat, blk, k + 1);
+                        if (!ReadAtRaw(hw, wOff + (uint64_t)k * blk, rb, blk) || memcmp(rb, pat, blk) != 0) bad++;
+                    }
+                    if (bad) { br->wErr += bad; Log(L"ERRO: %d bloco(s) de 1 MB voltaram diferentes do que foi gravado.", bad); }
+                    /* gravação aleatória de 4 KB dentro da área de teste */
+                    SetPhase(L"Medindo o acesso aleatório (gravação)...", 300);
+                    g_done = 0;
+                    int n = 0;
+                    double t1 = NowSec(), el = 0;
+                    uint64_t slots = wLen / tl;
+                    while (n < 300) {
+                        if (g_cancel) goto out;
+                        uint64_t o = wOff + (Rnd64() % slots) * tl;
+                        FillPat(pat, tl, 0x1000u + (uint32_t)n);
+                        if (!WriteAtRaw(hw, o, pat, tl)) { br->wErr++; break; }
+                        n++;
+                        g_done++;
+                        el = NowSec() - t1;
+                        if (el > 6.0) break;
+                    }
+                    if (el > 0) br->rw = n / el;
+                    Log(L"Gravação aleatória de 4 KB: %.0f operações/s.", br->rw);
+                }
+            }
+        }
+    }
+    done = !g_cancel;
+
+out:
+    /* devolve o conteúdo original da área de teste, mesmo se cancelado */
+    if (touched && hw != INVALID_HANDLE_VALUE && save) {
+        SetIndet(L"Devolvendo o conteúdo original do cartão...");
+        BOOL ok = TRUE;
+        for (DWORD k = 0; k < wLen / blk; k++)
+            if (!WriteAtRaw(hw, wOff + (uint64_t)k * blk, save + (uint64_t)k * blk, blk)) ok = FALSE;
+        FlushFileBuffers(hw);
+        for (DWORD k = 0; ok && k < wLen / blk; k++)
+            if (!ReadAtRaw(hw, wOff + (uint64_t)k * blk, rb, blk) || memcmp(rb, save + (uint64_t)k * blk, blk) != 0) ok = FALSE;
+        if (ok) Log(L"Conteúdo original da área de teste devolvido e conferido.");
+        else {
+            Log(L"ATENÇÃO: não foi possível devolver ou conferir o conteúdo original de %u MB na posição %I64u do cartão.", (unsigned)(wLen >> 20), (unsigned long long)wOff);
+            SetSummary(MB_ICONWARNING, L"Atenção: o teste de gravação usou 32 MB no meio do cartão e não foi possível confirmar que o conteúdo original voltou igual. Confira os arquivos do cartão.");
+        }
+    }
+    if (hw != INVALID_HANDLE_VALUE) CloseHandle(hw);
+    if (locked) UnlockVolumes(&vs);
+    if (hd != INVALID_HANDLE_VALUE) CloseHandle(hd);
+    if (save) FREE_ALIGNED(save);
+    if (buf) FREE_ALIGNED(buf);
+    if (pat) FREE_ALIGNED(pat);
+    if (rb) FREE_ALIGNED(rb);
+    if (g_cancel) Log(L"Teste de desempenho cancelado.");
+    if (!done || br->seqR <= 0) return FALSE;
+
+    /* resultado */
+    BenchEval(br, &v->bj);
+    BenchJudge *bj = &v->bj;
+    wchar_t a[32], b[32], c[32], d2[32];
+    FmtNum(br->seqR, 1, a, 32);
+    if (br->hasW) {
+        FmtNum(br->seqW, 1, b, 32);
+        FmtNum(br->wMin, 1, c, 32);
+        VS(cause, L"Leitura sequencial: %ls MB/s. Gravação sequencial: %ls MB/s (janela mais lenta: %ls MB/s).", a, b, c);
+    } else VS(cause, L"Leitura sequencial: %ls MB/s. A gravação não foi testada.", a);
+    FmtNum(br->rr, 0, c, 32);
+    if (br->hasW) {
+        FmtNum(br->rw, 0, d2, 32);
+        VS(card, L"Leitura: %ls operações/s (%ls). Gravação: %ls operações/s (%ls).", c, QW(bj->rand), d2, QW(bj->randW));
+    } else VS(card, L"Leitura: %ls operações/s (%ls).", c, QW(bj->rand));
+    if (br->hasW)
+        VS(data, L"Pela gravação sequencial, equivale a %hs. Medido neste leitor: um leitor lento mostra menos do que o cartão entrega.", BENCH_CLASS_NAME[bj->classIdx]);
+    else VS(data, L"Marque o teste de gravação para estimar a classe de velocidade (Class 10, U1, U3...).");
+    {
+        const wchar_t *gm = bj->game == 2 ? L"bom" : (bj->game == 1 ? L"serve para jogos leves" : L"fraco");
+        const wchar_t *md = bj->media == 3 ? L"fotos e vídeo até 4K" : (bj->media == 2 ? L"fotos e vídeo Full HD" : (bj->media == 1 ? L"só fotos e vídeo básico" : (bj->media == 0 ? L"não serve (gravação lenta)" : L"não testado")));
+        const wchar_t *tr = bj->trust == BT_OK ? L"boa" : (bj->trust == BT_DOUBT ? L"duvidosa" : L"baixa");
+        wchar_t er[80] = L"";
+        if (br->rErr || br->wErr) _snwprintf(er, 79, L" Erros no teste: %d.", br->rErr + br->wErr);
+        VS(todo, L"Game stick: %ls. Foto e vídeo: %ls. Confiança no cartão: %ls.%ls", gm, md, tr, er);
+    }
+    if (bj->trust == BT_BAD) {
+        v->level = 2;
+        VS(title, L"Cartão genérico ou instável: não confie nele");
+    } else if (bj->trust == BT_DOUBT) {
+        v->level = 1;
+        VS(title, L"Desempenho irregular: use só para dados que você possa perder");
+    } else if (bj->game == 2 && bj->media >= 2) {
+        VS(title, bj->media == 3 ? L"Bom para game stick, fotos e vídeo 4K" : L"Bom para game stick, fotos e vídeo Full HD");
+    } else if (bj->game == 2) {
+        v->level = bj->media == 0 ? 1 : 0;
+        VS(title, bj->media == -1 ? L"Bom para game stick (gravação não testada)" : L"Bom para game stick; fraco para vídeo");
+    } else if (bj->game == 1) {
+        v->level = 1;
+        VS(title, bj->media >= 2 ? L"Serve para jogos leves, fotos e vídeo" : L"Serve para jogos leves");
+    } else {
+        v->level = 1;
+        VS(title, bj->media >= 2 ? L"Bom para fotos e vídeo; lento para game stick" : L"Cartão lento: serve só para guardar arquivos");
+    }
+    g_bm.valid = TRUE; g_bm.disk = j->src; g_bm.size = size; g_bm.br = *br; g_bm.bj = *bj;
+    Log(L"Resultado: %ls.", v->title);
+    v->valid = TRUE;
+    return TRUE;
 }
 
 /* ------------------------------------------------------------ proteção do cartão (registros CID/CSD)
@@ -2419,6 +3073,7 @@ static DWORD WINAPI Worker(LPVOID p) {
     case OP_AUTH: ok = DoAuth(j); break;
     case OP_DIAG: ok = DoHealth(j); break;
     case OP_CSD: ok = j->cls ? DoCsdArduino(j) : DoCsdInternal(j); break;
+    case OP_BENCH: ok = DoBench(j); break;
     }
     Log(ok ? L"=== Fim: concluído ===" : L"=== Fim: não concluído ===");
     PostMessageW(g_hwnd, WM_APP_DONE, ok, 0);
@@ -2538,7 +3193,7 @@ static void Relayout(void) {
 
 /* área inferior: no Diagnóstico alterna entre o veredito e o registro técnico; nas outras tarefas mostra o registro */
 static void ShowArea(void) {
-    BOOL diag = (g_op == OP_DIAG || g_op == OP_CSD);
+    BOOL diag = IS_VIEW(g_op);
     BOOL log = !diag || g_showLog;
     BOOL rv = diag && g_resView;
     if (rv)
@@ -2616,6 +3271,9 @@ static void UpdateEnable(void) {
     case OP_RECOVER:
         if (RecoverMode() == RM_RESTORE) warn = L"Esta opção apaga todas as partições e dados do cartão.";
         break;
+    case OP_BENCH:
+        if (Checked(ID_CHK1)) warn = L"O teste de gravação copia 32 MB do meio do cartão, grava por cima e devolve o original. Não retire o cartão durante o teste.";
+        break;
     case OP_CSD:
         if (Checked(ID_RADB) && Checked(ID_CHK1)) warn = L"Vai regravar o registro CSD do cartão (só o bit de proteção temporária).";
         break;
@@ -2665,7 +3323,8 @@ static void ApplyOp(int op) {
         L"Repara cartão sem acesso ou com capacidade errada e recupera arquivos.",
         L"Descobre se o cartão é verdadeiro: fabricante gravado no cartão, capacidade real e velocidade.",
         L"Descobre o defeito do cartão, se ele tem conserto e se os dados podem ser salvos.",
-        L"Lê os registros internos do cartão (CID e CSD) e mostra se a gravação está travada por um bit de proteção, por senha ou pelo firmware."};
+        L"Lê os registros internos do cartão (CID e CSD) e mostra se a gravação está travada por um bit de proteção, por senha ou pelo firmware.",
+        L"Mede a velocidade de leitura e gravação, sequencial e de 4 KB, e diz se o cartão serve para game stick, fotos e vídeo ou se é um cartão genérico em que não dá para confiar."};
     g_op = op;
     g_hover = 0;
     g_resView = FALSE;
@@ -2682,7 +3341,7 @@ static void ApplyOp(int op) {
     ShowCtl(ID_LBLFILE, file);
     ShowCtl(ID_EDITFILE, file);
     ShowCtl(ID_BROWSE, file);
-    ShowCtl(ID_CHK1, op <= OP_VERIFY || op == OP_AUTH || op == OP_DIAG);
+    ShowCtl(ID_CHK1, op <= OP_VERIFY || op == OP_AUTH || op == OP_DIAG || op == OP_BENCH);
     ShowCtl(ID_CHK2, op == OP_VERIFY);
     ShowCtl(ID_RADA, op == OP_CSD);
     ShowCtl(ID_RADB, op == OP_CSD);
@@ -2739,6 +3398,11 @@ static void ApplyOp(int op) {
     case OP_DIAG:
         SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão");
         SetDlgItemTextW(g_hwnd, ID_CHK1, L"Testar gravação (grava 4 KB em 2 pontos e devolve o conteúdo original)");
+        SetChk(ID_CHK1, TRUE);
+        break;
+    case OP_BENCH:
+        SetDlgItemTextW(g_hwnd, ID_LBL1, L"Cartão");
+        SetDlgItemTextW(g_hwnd, ID_CHK1, L"Medir também a gravação (usa 32 MB no meio do cartão e devolve o conteúdo original)");
         SetChk(ID_CHK1, TRUE);
         break;
     }
@@ -2824,7 +3488,7 @@ static BOOL Confirm(const wchar_t *t) {
 static void StartJob(void) {
     g_cancel = 0; g_done = 0; g_total = 0; g_indet = 0;
     g_summary[0] = 0;
-    if (g_op == OP_DIAG || g_op == OP_CSD) { g_vd.valid = FALSE; g_showLog = TRUE; g_resView = TRUE; Relayout(); }
+    if (IS_VIEW(g_op)) { g_vd.valid = FALSE; g_showLog = TRUE; g_resView = TRUE; Relayout(); }
     SetBusy(TRUE);
     SetDlgItemTextW(g_hwnd, ID_STATUS, L"Iniciando...");
     g_t0 = GetTickCount64();
@@ -3001,7 +3665,7 @@ static void OnDone(BOOL ok) {
     SetDlgItemTextW(g_hwnd, ID_STATUS, ok ? L"Concluído." : L"Não concluído — veja o registro abaixo.");
     SetBusy(FALSE);
     RefreshDisks();
-    if (g_job.op == OP_DIAG || g_job.op == OP_CSD) { g_showLog = !g_vd.valid; ShowArea(); }
+    if (IS_VIEW(g_job.op)) { g_showLog = !g_vd.valid; ShowArea(); }
     FlashWindow(g_hwnd, TRUE);
     if (g_summary[0]) MessageBoxW(g_hwnd, g_summary, APP_TITLE, MB_OK | g_summaryIcon);
     if (g_openBrowse) {
@@ -3124,9 +3788,10 @@ static void CreateUi(void) {
     SetTheme(pb, L"", L"");
     SendMessageW(pb, 0x2001 /* PBM_SETBKCOLOR */, 0, (LPARAM)g_pal.btnEdge);
     SendMessageW(pb, 0x0409 /* PBM_SETBARCOLOR */, 0, (LPARAM)CL_NEON);
-    static const int bids[] = {ID_OP0, ID_OP0 + 1, ID_OP0 + 2, ID_OP0 + 3, ID_OP0 + 4, ID_OP0 + 5, ID_OP0 + 6, ID_OP0 + 7, ID_DETECT,
+    static const int bids[] = {ID_OP0, ID_OP0 + 1, ID_OP0 + 2, ID_OP0 + 3, ID_OP0 + 4, ID_OP0 + 5, ID_OP0 + 6, ID_OP0 + 7, ID_OP0 + 8, ID_DETECT,
                                ID_REFRESH, ID_SHOWALL, ID_BROWSE, ID_CHK1, ID_CHK2, ID_RADA, ID_RADB, ID_START, ID_CANCELBTN, ID_NEXT, ID_LOGBTN, ID_OPTS, ID_EJECT};
     for (int i = 0; i < (int)(sizeof bids / sizeof bids[0]); i++) SetWindowSubclass(Ctl(bids[i]), BtnSub, bids[i], 0);
+    SetWindowSubclass(Ctl(ID_RESULT), ResSub, ID_RESULT, 0);
 }
 
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {

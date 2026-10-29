@@ -40,6 +40,33 @@ O resultado é um veredito em quatro linhas: **causa provável**, **o cartão te
 
 ![Veredito do Diagnóstico](img/diagnostico-veredito.png)
 
+**Aba Conteúdo.** Depois da análise, o Diagnóstico também lê as pastas e arquivos do cartão (somente leitura; FAT, exFAT e ext2/3/4) e mostra na aba **Conteúdo**:
+- quanto do cartão está ocupado, em uma barra por tipo de arquivo, com o que está livre e o que está fora das partições;
+- os tipos: jogos (ROMs de emuladores), sistema e emulador (BIOS, saves, configurações, sistema Linux), música, vídeo, fotos, documentos, programas e compactados;
+- as extensões mais comuns (`.gba`, `.mp3`, `.jpg`...), com quantidade e tamanho;
+- o **tipo de uso** do cartão (jogos e emulação, console/game stick com sistema Linux, câmera, vídeos, música, documentos ou misto), pelas pastas (`roms`, `retroarch`, `DCIM`...) e pelas extensões;
+- se o cartão **serve para esse uso**, juntando o veredito de saúde e, se você já rodou o **Desempenho** nesse cartão, a velocidade medida.
+
+Cartões NTFS, criptografados ou com sistema desconhecido têm o conteúdo ignorado (o app avisa).
+
+### Desempenho
+Mede o cartão e diz para que ele presta. Não precisa de nenhum aparelho extra.
+- **Leitura sequencial** em 3 regiões (início, meio e fim). Se uma região for bem mais lenta que as outras, é sinal de desgaste ou de cartão falso.
+- **Acesso aleatório de 4 KB** em leitura (o que os jogos mais usam) e, com o teste de gravação, em gravação.
+- **Gravação sequencial** (opcional, marcada por padrão): usa 32 MB no meio do cartão. O app copia o conteúdo original para a memória, grava, confere o que gravou e **devolve o original e confere de novo**, mesmo se você cancelar. Não retire o cartão durante o teste.
+- O gráfico mostra a velocidade ao longo do teste. Quedas bruscas na gravação indicam cartão ruim.
+
+O resultado diz: velocidade medida, acesso aleatório (bom, médio ou fraco), classe estimada (Class 10 / U1, U3 / V30, V60, V90, pela gravação sequencial) e para que serve:
+
+| Resultado | Significado |
+|---|---|
+| Game stick: bom | Leitura de 40 MB/s ou mais e acesso aleatório rápido |
+| Game stick: serve para jogos leves | Leitura acima de 20 MB/s; pode travar em PSP, Dreamcast e jogos pesados |
+| Foto e vídeo: Full HD / 4K | Gravação de 10 MB/s ou mais (Full HD) e 30 MB/s ou mais (4K) |
+| Cartão genérico ou instável | Erros, leitura muito desigual, quedas bruscas ou velocidade muito baixa: não guarde nada que não possa perder |
+
+Os números são medidos **neste leitor**, uma operação por vez; leitores USB lentos mostram menos do que o cartão entrega, e os limites são aproximados, não os da especificação oficial (A1/A2). Compare cartões testados no mesmo leitor.
+
 ### Proteção do cartão
 Descobre **por que o cartão não deixa gravar**. Escolha o modo no topo da tela.
 
@@ -157,6 +184,8 @@ Depois do teste completo, use **Recuperar e reparar → Restaurar cartão** para
 | Arquivo | Conteúdo |
 |---|---|
 | `sdclone.c` | Interface Win32 e operações de disco |
+| `usage.h` | Conteúdo do cartão: ocupação, tipos de arquivo e perfil de uso (sem Windows, testado em Linux) |
+| `bench.h` | Julgamento do teste de desempenho (sem Windows) |
 | `core.h` | Motor de recuperação (assinaturas de arquivo), padrão do teste de capacidade e tabela de fabricantes |
 | `fsread.h` | Leitores somente leitura de FAT12/16/32, exFAT e ext2/3/4 (independentes de Windows) |
 | `diag.h` | Diagnóstico: MBR/GPT, partições perdidas, veredito e reconstrução do MBR (independente de Windows) |
