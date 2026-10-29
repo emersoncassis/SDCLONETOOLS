@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <wchar.h>
+#include <math.h>
 #include "core.h"
 #include "diag.h"
 #include "usage.h"
@@ -30,7 +31,7 @@ enum {
     ID_OP0 = 100, /* 100..107 */
     ID_DESC = 120, ID_LBL1, ID_COMBO1, ID_REFRESH, ID_SHOWALL, ID_LBL2, ID_COMBO2, ID_COMBOB, ID_COMBOC,
     ID_LBLFILE, ID_EDITFILE, ID_BROWSE, ID_CHK1, ID_CHK2, ID_RADA, ID_RADB,
-    ID_START, ID_CANCELBTN, ID_PROGRESS, ID_STATUS, ID_LOG, ID_HEADER, ID_TITLE, ID_WARN, ID_RESULT, ID_NEXT, ID_LOGBTN, ID_COMBOP, ID_DETECT, ID_OPTS, ID_EJECT,
+    ID_START, ID_CANCELBTN, ID_PROGRESS, ID_STATUS, ID_LOG, ID_HEADER, ID_TITLE, ID_WARN, ID_RESULT, ID_NEXT, ID_LOGBTN, ID_COMBOP, ID_DETECT, ID_OPTS, ID_EJECT, ID_STEPS,
     ID_BR_PART = 300, ID_BR_LBL, ID_BR_PATH, ID_BR_LIST, ID_BR_INFO, ID_BR_UP, ID_BR_COPYSEL, ID_BR_COPYALL, ID_BR_CANCEL, ID_BR_CLOSE
 };
 
@@ -162,7 +163,7 @@ static void LoadPalette(void) {
 #define NAV_Y1 308
 
 /* resultado do diagnóstico (preenchido pela thread de trabalho, lido pela interface ao terminar) */
-enum { NX_NONE = 0, NX_BACKUP, NX_CARVE, NX_REBUILD, NX_RESTORE, NX_AUTH };
+enum { NX_NONE = 0, NX_BACKUP, NX_CARVE, NX_REBUILD, NX_RESTORE, NX_AUTH, NX_BENCH };
 enum { MC_DATA = 0, MC_EMPTY, MC_SLOW, MC_BAD, MC_SKIP };
 #define MAP_N 128
 #define IS_VIEW(op) ((op) == OP_DIAG || (op) == OP_CSD || (op) == OP_BENCH) /* páginas que terminam em veredito */
@@ -173,6 +174,8 @@ typedef struct {
     uint8_t cell[MAP_N];
     int nData, nEmpty, nSlow, nBad, nSkip;
     /* conteúdo do cartão (aba "Conteúdo" do Diagnóstico) */
+    int hRead, hWrite, hPart; /* saúde resumida: 0 ok, 1 atenção, 2 falha, 3 não testado */
+    int uFitLevel;            /* 0 serve, 1 ressalvas, 2 não serve, 3 meça o desempenho */
     BOOL usage;
     UsageStat us;
     uint64_t uCard;
@@ -186,8 +189,11 @@ typedef struct {
     int nCurveR, nCurveW;
 } Verdict;
 static Verdict g_vd;
+static char g_demo[16] = ""; /* modo demonstração (--demo=...) */
+static BOOL IsHero(void);
+static int NextFor(void);
 static BOOL g_showLog = FALSE;
-static const wchar_t *NX_TEXT[] = {L"", L"Fazer backup agora", L"Recuperar arquivos", L"Reconstruir partições", L"Restaurar o cartão", L"Testar autenticidade"};
+static const wchar_t *NX_TEXT[] = {L"", L"Próximo: Fazer backup", L"Próximo: Recuperar arquivos", L"Próximo: Reparar partições", L"Próximo: Restaurar", L"Próximo: Autenticidade", L"Próximo: Desempenho"};
 
 static HBRUSH g_brBg, g_brInput, g_brLog, g_brCard;
 static HFONT g_fontB, g_fontMono, g_fontTitle, g_fontSmall, g_fontH, g_fontVal, g_fontValB;
@@ -250,6 +256,10 @@ static int(WINAPI *pGpFillPath)(void *, void *, void *);
 static int(WINAPI *pGpDrawPath)(void *, void *, void *);
 static int(WINAPI *pGpDrawLine)(void *, void *, float, float, float, float);
 static int(WINAPI *pGpFillEll)(void *, void *, float, float, float, float);
+/* opcionais (gráfico de rosca, giro da animação, ícones vetoriais) */
+static int(WINAPI *pGpFillPie)(void *, void *, float, float, float, float, float, float);
+static int(WINAPI *pGpDrawArc)(void *, void *, float, float, float, float, float, float);
+static int(WINAPI *pGpPoly)(void *, const float *, int);
 
 #define ARGB(c) (0xFF000000u | ((UINT32)GetRValue(c) << 16) | ((UINT32)GetGValue(c) << 8) | (UINT32)GetBValue(c))
 #define GPF(v, n) (*(FARPROC *)&(v) = GetProcAddress(g_gpDll, n))
@@ -265,6 +275,7 @@ static void GpInit(void) {
     GPF(pGpNewPen, "GdipCreatePen1"); GPF(pGpDelPen, "GdipDeletePen");
     GPF(pGpFillPath, "GdipFillPath"); GPF(pGpDrawPath, "GdipDrawPath"); GPF(pGpDrawLine, "GdipDrawLine");
     GPF(pGpFillEll, "GdipFillEllipse");
+    GPF(pGpFillPie, "GdipFillPie"); GPF(pGpDrawArc, "GdipDrawArc"); GPF(pGpPoly, "GdipAddPathPolygon");
     if (!pGpStartup || !pGpShutdown || !pGpFromHdc || !pGpDelG || !pGpSmooth || !pGpNewPath || !pGpDelPath || !pGpArc ||
         !pGpClose || !pGpNewBrush || !pGpDelBrush || !pGpNewPen || !pGpDelPen || !pGpFillPath || !pGpDrawPath ||
         !pGpDrawLine || !pGpFillEll)
@@ -384,6 +395,159 @@ static void Tick(HDC dc, float x1, float y1, float x2, float y2, float x3, float
     }
 }
 
+
+/* ---------------------------------------------- desenho vetorial (ícones, rosca, animação) */
+#define PI_F 3.14159265f
+/* fatia de pizza; ângulos em graus, sentido horário a partir das 3 horas (como no GDI+) */
+static void PieSeg(HDC dc, float cx, float cy, float r, float a0, float sw, COLORREF c) {
+    if (sw <= 0.05f) return;
+    if (g_gpOk && pGpFillPie) {
+        void *g = NULL, *br = NULL;
+        if (pGpFromHdc(dc, &g) != 0) return;
+        pGpSmooth(g, 4);
+        pGpNewBrush(ARGB(c), &br);
+        pGpFillPie(g, br, cx - r, cy - r, 2 * r, 2 * r, a0, sw);
+        pGpDelBrush(br);
+        pGpDelG(g);
+        return;
+    }
+    POINT pts[100];
+    int n = 0;
+    pts[n].x = (LONG)cx; pts[n].y = (LONG)cy; n++;
+    int steps = (int)(sw / 4.0f) + 2;
+    if (steps > 96) steps = 96;
+    for (int i = 0; i <= steps; i++) {
+        float a = (a0 + sw * i / steps) * PI_F / 180.0f;
+        pts[n].x = (LONG)(cx + r * cosf(a)); pts[n].y = (LONG)(cy + r * sinf(a)); n++;
+    }
+    HBRUSH b = CreateSolidBrush(c);
+    HPEN pn = CreatePen(PS_SOLID, 1, c);
+    HGDIOBJ o1 = SelectObject(dc, b), o2 = SelectObject(dc, pn);
+    Polygon(dc, pts, n);
+    SelectObject(dc, o1); SelectObject(dc, o2);
+    DeleteObject(b); DeleteObject(pn);
+}
+
+static void ArcLine(HDC dc, float cx, float cy, float r, float a0, float sw, float wpx, COLORREF c) {
+    if (g_gpOk && pGpDrawArc) {
+        void *g = NULL, *pn = NULL;
+        if (pGpFromHdc(dc, &g) != 0) return;
+        pGpSmooth(g, 4);
+        pGpNewPen(ARGB(c), wpx, 2, &pn);
+        pGpDrawArc(g, pn, cx - r, cy - r, 2 * r, 2 * r, a0, sw);
+        pGpDelPen(pn);
+        pGpDelG(g);
+        return;
+    }
+    HPEN pn = CreatePen(PS_SOLID, (int)wpx, c);
+    HGDIOBJ o = SelectObject(dc, pn);
+    int steps = (int)(sw / 6.0f) + 2;
+    for (int i = 0; i <= steps; i++) {
+        float a = (a0 + sw * i / steps) * PI_F / 180.0f;
+        int x = (int)(cx + r * cosf(a)), y = (int)(cy + r * sinf(a));
+        if (i == 0) MoveToEx(dc, x, y, NULL); else LineTo(dc, x, y);
+    }
+    SelectObject(dc, o);
+    DeleteObject(pn);
+}
+
+/* polígono preenchido; pts = x0,y0,x1,y1,... */
+static void PolyFill(HDC dc, const float *pts, int n, COLORREF fill) {
+    if (g_gpOk && pGpPoly) {
+        void *g = NULL, *p = NULL, *br = NULL;
+        if (pGpFromHdc(dc, &g) != 0) return;
+        pGpSmooth(g, 4);
+        pGpNewPath(0, &p);
+        pGpPoly(p, pts, n);
+        pGpNewBrush(ARGB(fill), &br);
+        pGpFillPath(g, br, p);
+        pGpDelBrush(br);
+        pGpDelPath(p);
+        pGpDelG(g);
+        return;
+    }
+    POINT q[64];
+    if (n > 64) n = 64;
+    for (int i = 0; i < n; i++) { q[i].x = (LONG)pts[2 * i]; q[i].y = (LONG)pts[2 * i + 1]; }
+    HBRUSH b = CreateSolidBrush(fill);
+    HPEN pn = CreatePen(PS_SOLID, 1, fill);
+    HGDIOBJ o1 = SelectObject(dc, b), o2 = SelectObject(dc, pn);
+    Polygon(dc, q, n);
+    SelectObject(dc, o1); SelectObject(dc, o2);
+    DeleteObject(b); DeleteObject(pn);
+}
+
+static void LineSeg(HDC dc, float x1, float y1, float x2, float y2, float wpx, COLORREF c) { Tick(dc, x1, y1, x2, y2, x2, y2, wpx, c); }
+
+/* escudo: 0 = saudável (visto), 1 = atenção (!), 2 = defeito (X) */
+static void ShieldIcon(HDC dc, float cx, float top, float w, float h, int level, COLORREF c) {
+    float pts[2 * 40];
+    int n = 0;
+    float hw = w / 2;
+#define PT(x, y) (pts[2 * n] = (x), pts[2 * n + 1] = (y), n++)
+    PT(cx, top);
+    PT(cx + hw, top + h * 0.16f);
+    PT(cx + hw, top + h * 0.50f);
+    for (int i = 1; i <= 12; i++) { /* curva até a ponta de baixo */
+        float t = i / 12.0f, u = 1 - t;
+        float x = u * u * (cx + hw) + 2 * u * t * (cx + hw * 0.92f) + t * t * cx;
+        float y = u * u * (top + h * 0.50f) + 2 * u * t * (top + h * 0.86f) + t * t * (top + h);
+        PT(x, y);
+    }
+    for (int i = 1; i <= 12; i++) {
+        float t = i / 12.0f, u = 1 - t;
+        float x = u * u * cx + 2 * u * t * (cx - hw * 0.92f) + t * t * (cx - hw);
+        float y = u * u * (top + h) + 2 * u * t * (top + h * 0.86f) + t * t * (top + h * 0.50f);
+        PT(x, y);
+    }
+    PT(cx - hw, top + h * 0.16f);
+#undef PT
+    PolyFill(dc, pts, n, c);
+    float s = w / 64.0f, my = top + h * 0.47f;
+    COLORREF wc = RGB(255, 255, 255);
+    if (level == 0) Tick(dc, cx - 13 * s, my, cx - 3 * s, my + 10 * s, cx + 15 * s, my - 10 * s, 5.5f * s, wc);
+    else if (level == 1) {
+        LineSeg(dc, cx, my - 15 * s, cx, my + 4 * s, 6 * s, wc);
+        Disc(dc, (int)cx, (int)(my + 14 * s), (int)(3.6f * s + 0.5f), wc);
+    } else {
+        LineSeg(dc, cx - 11 * s, my - 11 * s, cx + 11 * s, my + 11 * s, 5.5f * s, wc);
+        LineSeg(dc, cx + 11 * s, my - 11 * s, cx - 11 * s, my + 11 * s, 5.5f * s, wc);
+    }
+}
+
+/* cartão SD (silhueta com canto cortado e contatos) */
+static void SdCardIcon(HDC dc, float l, float t, float w, float h, COLORREF body, COLORREF contact) {
+    float cut = w * 0.30f;
+    float pts[] = {l, t, l + w - cut, t, l + w, t + cut, l + w, t + h, l, t + h};
+    PolyFill(dc, pts, 5, body);
+    float cw = w * 0.09f, gap = w * 0.045f, cy = t + h * 0.07f, ch = h * 0.20f;
+    for (int i = 0; i < 6; i++) {
+        float x = l + w * 0.10f + i * (cw + gap);
+        if (x + cw > l + w - cut * 0.55f && i > 3) break;
+        RECT r = {(LONG)x, (LONG)cy, (LONG)(x + cw), (LONG)(cy + ch)};
+        RRect(dc, r, (int)(cw / 3), contact, CL_NONE);
+    }
+}
+
+/* círculo de status pequeno: 0 ok (visto), 1 atenção (!), 2 erro (X), 3 não testado (traço) */
+static void StatusDot(HDC dc, int cx, int cy, int r, int st) {
+    COLORREF c = st == 0 ? g_pal.ok : st == 1 ? g_pal.caution : st == 2 ? CL_DANGER : g_pal.btnEdge;
+    Disc(dc, cx, cy, r, c);
+    float s = (float)r / 10.0f;
+    COLORREF wc = RGB(255, 255, 255);
+    if (st == 0) Tick(dc, cx - 4.5f * s, (float)cy, cx - 1.0f * s, cy + 3.5f * s, cx + 5.0f * s, cy - 3.5f * s, 2.0f * s, wc);
+    else if (st == 1) { LineSeg(dc, (float)cx, cy - 5 * s, (float)cx, cy + 1 * s, 2.2f * s, wc); Disc(dc, cx, (int)(cy + 4.5f * s), (int)(1.4f * s + 0.5f), wc); }
+    else if (st == 2) { LineSeg(dc, cx - 4 * s, cy - 4 * s, cx + 4 * s, cy + 4 * s, 2.0f * s, wc); LineSeg(dc, cx + 4 * s, cy - 4 * s, cx - 4 * s, cy + 4 * s, 2.0f * s, wc); }
+    else LineSeg(dc, cx - 4 * s, (float)cy, cx + 4 * s, (float)cy, 2.0f * s, wc);
+}
+
+/* indicador girando */
+static void Spinner(HDC dc, int cx, int cy, int r, float wpx) {
+    float a = (float)((GetTickCount64() / 3) % 360);
+    ArcLine(dc, (float)cx, (float)cy, (float)r, 0, 360, wpx, g_pal.btnEdge);
+    ArcLine(dc, (float)cx, (float)cy, (float)r, a, 100, wpx, CL_NEON);
+}
+
 /* ---------------------------------------------------------------- textos */
 /* indexados por operação: C2I, I2C, C2C, VERIFY, RECOVER, AUTH, DIAG */
 static const wchar_t *NAV_T[] = {L"Fazer backup", L"Gravar imagem", L"Clonar cartão", L"Verificar setores", L"Recuperar e reparar", L"Autenticidade", L"Diagnóstico", L"Proteção do cartão", L"Desempenho"};
@@ -396,6 +560,7 @@ static int NavY(int slot) { return slot < 6 ? NAV_Y0 + slot * 40 : NAV_Y1 + (slo
 
 static COLORREF BtnBg(int id) {
     if (id >= ID_OP0 && id < ID_OP0 + OP_COUNT) return CL_BG;
+    if ((id == ID_START || id == ID_OPTS) && IsHero()) return CL_PANEL;
     if (id == ID_CHK1 || id == ID_CHK2 || id == ID_RADA || id == ID_RADB || id == ID_SHOWALL || id == ID_REFRESH || id == ID_BROWSE || id == ID_DETECT) return CL_PANEL;
     return CL_BG;
 }
@@ -444,7 +609,8 @@ static void DrawButton(DRAWITEMSTRUCT *d) {
         Glyph(dc, 0xE72C, &r, dis ? CL_DIM : CL_TXT, g_fontIcon);
     } else if (id == ID_START || id == ID_CANCELBTN || id == ID_REFRESH || id == ID_BROWSE || id == ID_NEXT || id == ID_DETECT || (id >= ID_BR_UP && id <= ID_BR_CLOSE)) {
         COLORREF fill, border, tc;
-        if (id == ID_START) {
+        BOOL prim = id == ID_NEXT || (id == ID_START && !(IS_VIEW(g_op) && g_vd.valid && g_vd.op == g_op && NextFor() != NX_NONE));
+        if (prim) {
             fill = dis ? g_pal.disFill : (sel ? g_pal.accentDown : (hot ? g_pal.accentHot : CL_NEON));
             border = CL_NONE;
             tc = dis ? g_pal.disTxt : g_pal.onAccent;
@@ -454,12 +620,12 @@ static void DrawButton(DRAWITEMSTRUCT *d) {
             tc = dis ? (g_dark ? RGB(120, 120, 120) : RGB(160, 160, 160)) : CL_TXT;
         }
         RRect(dc, r, S(4), fill, border);
-        if (foc && id != ID_START) {
+        if (foc && !prim) {
             RECT fr = r;
             InflateRect(&fr, -S(2), -S(2));
             RRect(dc, fr, S(3), CL_NONE, g_pal.chkEdge);
         }
-        Txt(dc, t, &r, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX, tc, id == ID_START ? g_fontB : g_font);
+        Txt(dc, t, &r, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX, tc, (id == ID_START && IsHero()) ? g_fontH : (prim ? g_fontB : g_font));
     } else {
         /* caixa de seleção */
         BOOL radio = (id == ID_RADA || id == ID_RADB), on = Checked(id);
@@ -560,8 +726,33 @@ static COLORREF MapColor(int c) {
 }
 
 /* painel com o veredito do diagnóstico */
-static int g_resTab = 0; /* 0 = saúde, 1 = conteúdo (aba do Diagnóstico) */
 static void FmtSize(uint64_t b, wchar_t *out, size_t n);
+static DiskInfo *FindDisk(int n);
+static int SelectedDisk(int id);
+
+/* jornada: Diagnóstico -> Autenticidade -> Desempenho (por cartão) */
+static const int JOURNEY_OP[3] = {OP_DIAG, OP_AUTH, OP_BENCH};
+static int g_jdisk = -1;
+static BOOL g_jdone[3];
+static BOOL g_diagForm = FALSE;          /* Diagnóstico mostrando o formulário de opções */
+static volatile LONG g_step = 0;         /* etapa do diagnóstico em andamento (animação) */
+static volatile LONG g_mapDone = 0;      /* pontos do mapa já lidos */
+static BOOL JourneyDone(int i) { return g_jdisk >= 0 && g_jdisk == SelectedDisk(ID_COMBO1) && g_jdone[i]; }
+
+/* tela inicial do Diagnóstico: cartão escolhido, ainda sem resultado */
+static BOOL IsHero(void) {
+    return g_op == OP_DIAG && !g_busy && !g_diagForm && !g_showLog && !(g_vd.valid && g_vd.op == OP_DIAG);
+}
+
+static int NextFor(void) {
+    if (g_busy) return NX_NONE;
+    if (IS_VIEW(g_op) && g_vd.valid && g_vd.op == g_op) {
+        if (g_op == OP_BENCH) return NX_NONE;
+        return g_vd.next;
+    }
+    if (g_op == OP_AUTH && JourneyDone(1)) return NX_BENCH;
+    return NX_NONE;
+}
 
 static COLORREF CatColor(int c) {
     switch (c) {
@@ -578,6 +769,21 @@ static COLORREF CatColor(int c) {
 static const wchar_t *CatName(int c) {
     static const wchar_t *n[CT_N] = {L"Jogos (ROMs)", L"Sistema e emulador", L"Música", L"Vídeo", L"Fotos", L"Documentos e texto", L"Programas e compactados", L"Outros"};
     return n[c];
+}
+static wchar_t CatGlyph(int c) {
+    static const wchar_t g[CT_N] = {0xE7FC, 0xE770, 0xE8D6, 0xE714, 0xE91B, 0xE8A5, 0xE7B8, 0xE7C3};
+    return g[c];
+}
+static wchar_t ProfileGlyph(int p) {
+    switch (p) {
+    case UP_CONSOLE: case UP_GAMES: return 0xE7FC;
+    case UP_SYSTEM: return 0xE770;
+    case UP_CAMERA: return 0xE722;
+    case UP_VIDEO: return 0xE714;
+    case UP_MUSIC: return 0xE8D6;
+    case UP_DOCS: return 0xE8A5;
+    default: return 0xE8B7;
+    }
 }
 
 static void DrawRows(HDC dc, int w, int y, int maxY, const wchar_t *const *lab, const wchar_t *const *val, int n) {
@@ -604,123 +810,19 @@ static void DrawBanner(HDC dc, int w, int y, int level, const wchar_t *title) {
     COLORREF lb = level == 0 ? g_pal.okBg : (level == 1 ? g_pal.cautionBg : g_pal.warnBg);
     RECT hb = {S(16), y, w - S(16), y + S(44)};
     RRect(dc, hb, S(4), lb, CL_NONE);
-    RECT gi = {hb.left + S(12), hb.top, hb.left + S(36), hb.bottom};
-    wchar_t g = level == 0 ? 0xE930 : (level == 1 ? 0xE7BA : 0xEA39);
-    if (g_fontIconM) Glyph(dc, g, &gi, lc, g_fontIconM);
-    else Disc(dc, (gi.left + gi.right) / 2, (hb.top + hb.bottom) / 2, S(6), lc);
+    ShieldIcon(dc, (float)(hb.left + S(24)), (float)(hb.top + S(10)), (float)S(20), (float)S(24), level, lc);
     RECT ti = {hb.left + S(46), hb.top, hb.right - S(12), hb.bottom};
     Txt(dc, title, &ti, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, CL_TXT, g_fontH);
 }
 
-/* abas do Diagnóstico: Saúde | Conteúdo */
-#define TAB_H 34
-static void TabRects(RECT *a, RECT *b) {
-    *a = (RECT){S(16), S(4), S(16) + S(86), S(4) + S(TAB_H - 6)};
-    *b = (RECT){S(16) + S(94), S(4), S(16) + S(94) + S(100), S(4) + S(TAB_H - 6)};
-}
-static void DrawTabs(HDC dc, int w) {
-    RECT a, b;
-    TabRects(&a, &b);
-    const wchar_t *nm[2] = {L"Saúde", L"Conteúdo"};
-    RECT *rr[2] = {&a, &b};
-    for (int i = 0; i < 2; i++) {
-        BOOL on = (g_resTab == i);
-        Txt(dc, nm[i], rr[i], DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, on ? CL_TXT : CL_DIM, on ? g_fontValB : g_fontVal);
-        if (on) {
-            RECT u = {rr[i]->left + S(10), rr[i]->bottom, rr[i]->right - S(10), rr[i]->bottom + S(2)};
-            Fill(dc, u, CL_NEON);
-        }
-    }
-    RECT sl = {S(16), S(TAB_H), w - S(16), S(TAB_H) + 1};
-    Fill(dc, sl, CL_EDGE);
-}
-
-static void DrawUsage(HDC dc, int w, int h, const Verdict *v, int y0) {
-    DrawBanner(dc, w, y0, 0, v->uTitle);
-    static const wchar_t *lab[4] = {L"Ocupação", L"Extensões mais comuns", L"Tipo de uso", L"Serve para esse uso?"};
-    const wchar_t *val[4] = {v->uOcc, v->uTop, v->uUse, v->uFit};
-    int legTop = h - S(112), barY = legTop - S(24);
-    DrawRows(dc, w, y0 + S(44) + S(12), barY - S(8), lab, val, 4);
-
-    /* barra de ocupação: cartão inteiro = largura total */
-    int bx = S(20), bw = w - S(40), bh = S(14);
-    RECT back = {bx, barY, bx + bw, barY + bh};
-    Fill(dc, back, g_pal.btnEdge);
-    double cap = (double)(v->uCard ? v->uCard : 1);
-    int x = bx;
-    for (int c = 0; c < CT_N; c++) {
-        if (v->us.catBytes[c] == 0) continue;
-        int sw = (int)((double)bw * (double)v->us.catBytes[c] / cap);
-        if (sw < 1) sw = 1;
-        if (x + sw > bx + bw) sw = bx + bw - x;
-        if (sw <= 0) break;
-        RECT sg = {x, barY, x + sw, barY + bh};
-        Fill(dc, sg, CatColor(c));
-        x += sw;
-    }
-    uint64_t freeIn = v->us.scannedBytes > v->us.usedBytes ? v->us.scannedBytes - v->us.usedBytes : 0;
-    int fw = (int)((double)bw * (double)freeIn / cap);
-    if (fw > 0 && x + fw > bx + bw) fw = bx + bw - x;
-    if (fw > 0) {
-        RECT sg = {x, barY, x + fw, barY + bh};
-        Fill(dc, sg, g_pal.empty);
-    }
-
-    /* legenda em 2 colunas */
-    int col = 0, row = 0;
-    HGDIOBJ o = SelectObject(dc, g_fontSmall);
-    SelectObject(dc, o);
-    int colW = (w - S(40)) / 2;
-    struct { COLORREF c; wchar_t t[96]; } it[CT_N + 2];
-    int n = 0;
-    for (int c = 0; c < CT_N; c++) {
-        if (v->us.catFiles[c] == 0) continue;
-        wchar_t sz[32];
-        FmtSize(v->us.catBytes[c], sz, 32);
-        it[n].c = CatColor(c);
-        _snwprintf(it[n].t, 95, L"%ls  %ls · %u arq.", CatName(c), sz, (unsigned)v->us.catFiles[c]);
-        it[n].t[95] = 0;
-        n++;
-    }
-    {
-        wchar_t sz[32];
-        FmtSize(freeIn, sz, 32);
-        it[n].c = g_pal.empty;
-        _snwprintf(it[n].t, 95, L"Livre nas partições  %ls", sz);
-        it[n].t[95] = 0;
-        n++;
-        if (v->uCard > v->us.scannedBytes + 64u * 1024 * 1024) {
-            FmtSize(v->uCard - v->us.scannedBytes, sz, 32);
-            it[n].c = g_pal.btnEdge;
-            _snwprintf(it[n].t, 95, L"Fora das partições  %ls", sz);
-            it[n].t[95] = 0;
-            n++;
-        }
-    }
-    for (int i = 0; i < n; i++) {
-        col = i / 5; row = i % 5;
-        if (col > 1) break;
-        int lx = S(20) + col * colW, ly = legTop + row * S(20);
-        RECT sq = {lx, ly + S(4), lx + S(10), ly + S(14)};
-        Fill(dc, sq, it[i].c);
-        RECT tr = {lx + S(16), ly, lx + colW - S(6), ly + S(18)};
-        Txt(dc, it[i].t, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, CL_TXT, g_fontSmall);
-    }
-}
-
 static void DrawCurve(HDC dc, RECT r, const float *c, int n, float vmax, COLORREF col) {
     if (n < 2 || vmax <= 0) return;
-    HPEN pen = CreatePen(PS_SOLID, S(2) > 1 ? S(2) : 1, col);
-    HGDIOBJ op = SelectObject(dc, pen);
-    for (int i = 0; i < n; i++) {
-        int x = r.left + (r.right - r.left) * i / (n - 1);
-        float vv = c[i] > vmax ? vmax : c[i];
-        int y = r.bottom - (int)((double)(r.bottom - r.top) * vv / vmax);
-        if (i == 0) MoveToEx(dc, x, y, NULL);
-        else LineTo(dc, x, y);
+    for (int i = 1; i < n; i++) {
+        float v0 = c[i - 1] > vmax ? vmax : c[i - 1], v1 = c[i] > vmax ? vmax : c[i];
+        float x0 = r.left + (float)(r.right - r.left) * (i - 1) / (n - 1), x1 = r.left + (float)(r.right - r.left) * i / (n - 1);
+        float y0 = r.bottom - (float)(r.bottom - r.top) * v0 / vmax, y1 = r.bottom - (float)(r.bottom - r.top) * v1 / vmax;
+        LineSeg(dc, x0, y0, x1, y1, (float)S(2), col);
     }
-    SelectObject(dc, op);
-    DeleteObject(pen);
 }
 
 /* barras das 4 medidas + curva de velocidade durante o teste */
@@ -737,28 +839,26 @@ static void DrawBenchChart(HDC dc, int w, int top, int h, const Verdict *v) {
         RECT lr = {lx, y, lx + labW, y + S(18)};
         Txt(dc, nm[i], &lr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX, CL_DIM, g_fontSmall);
         RECT bk = {bx, y + S(3), bx + bwMax, y + S(15)};
-        Fill(dc, bk, g_pal.btnEdge);
+        RRect(dc, bk, S(3), g_pal.btnEdge, CL_NONE);
         wchar_t t[48];
         if (val[i] < 0) {
             wcscpy(t, L"não testado");
         } else {
             double f = val[i] / ref[i];
             if (f > 1) f = 1;
-            RECT fl = {bx, y + S(3), bx + (int)(bwMax * f) + 1, y + S(15)};
-            Fill(dc, fl, i < 2 ? CL_NEON : CatColor(CT_VIDEO));
+            RECT fl = {bx, y + S(3), bx + (int)(bwMax * f) + S(6), y + S(15)};
+            RRect(dc, fl, S(3), i < 2 ? CL_NEON : CatColor(CT_VIDEO), CL_NONE);
             _snwprintf(t, 47, L"%.0f %ls", val[i], un[i]);
             t[47] = 0;
         }
         RECT tr = {bx + bwMax + S(8), y, bx + bwMax + S(100), y + S(18)};
         Txt(dc, t, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX, CL_TXT, g_fontSmall);
     }
-    /* curva */
     int cx = bx + bwMax + S(120);
     RECT cr = {cx, top + S(24), w - S(24), top + h - S(18)};
     RECT cap = {cx, top + S(6), w - S(20), top + S(22)};
     Txt(dc, L"Velocidade durante o teste (MB/s)", &cap, DT_SINGLELINE | DT_NOPREFIX, CL_DIM, g_fontSmall);
-    RECT bk = {cr.left, cr.top, cr.right, cr.bottom};
-    RRect(dc, bk, S(3), g_pal.input, CL_EDGE);
+    RRect(dc, cr, S(3), g_pal.input, CL_EDGE);
     float vmax = 10;
     for (int i = 0; i < v->nCurveR; i++) if (v->curveR[i] > vmax) vmax = v->curveR[i];
     for (int i = 0; i < v->nCurveW; i++) if (v->curveW[i] > vmax) vmax = v->curveW[i];
@@ -771,6 +871,308 @@ static void DrawBenchChart(HDC dc, int w, int top, int h, const Verdict *v) {
     Txt(dc, L"— gravação", &lg2, DT_SINGLELINE | DT_NOPREFIX, CatColor(CT_VIDEO), g_fontSmall);
 }
 
+/* mapa de 128 pontos numa faixa */
+static void DrawMiniMap(HDC dc, int x, int y, int w, int h, const Verdict *v, int upto) {
+    for (int i = 0; i < MAP_N; i++) {
+        RECT c = {x + w * i / MAP_N, y, x + w * (i + 1) / MAP_N, y + h};
+        if (c.right - c.left > 3) c.right -= 1;
+        Fill(dc, c, i < upto ? MapColor(v->cell[i]) : g_pal.btnEdge);
+    }
+}
+
+static void CardBox(HDC dc, RECT r, const wchar_t *cap) {
+    RRect(dc, r, S(8), CL_BG, CL_EDGE);
+    RECT t = {r.left + S(16), r.top + S(10), r.right - S(16), r.top + S(28)};
+    Txt(dc, cap, &t, DT_SINGLELINE | DT_NOPREFIX, CL_DIM, g_fontSmall);
+}
+
+static const wchar_t *NextHint(const Verdict *v) {
+    switch (v->next) {
+    case NX_BACKUP: return L"Faça um backup agora, antes que o cartão piore.";
+    case NX_CARVE: return L"Recupere os arquivos para o computador.";
+    case NX_REBUILD: return L"Reconstrua as partições. Não apaga os dados.";
+    case NX_RESTORE: return L"Restaure o cartão para voltar a usar.";
+    case NX_AUTH: return L"Confira se o cartão é original e se a capacidade é real.";
+    case NX_BENCH: return L"Meça a velocidade para saber se ele serve para jogos e vídeo.";
+    }
+    return v->todo;
+}
+
+/* resultado do Diagnóstico: saúde (esquerda) + conteúdo (direita) + próximo passo */
+static void DrawDiagResult(HDC dc, int w, int h, const Verdict *v) {
+    int pad = S(16), bot = h - S(66);
+    COLORREF lc = v->level == 0 ? g_pal.ok : (v->level == 1 ? g_pal.caution : CL_DANGER);
+
+    /* ---- saúde ---- */
+    RECT L = {pad, pad, pad + S(236), bot};
+    CardBox(dc, L, L"Saúde");
+    int cx = (L.left + L.right) / 2;
+    ShieldIcon(dc, (float)cx, (float)(L.top + S(36)), (float)S(58), (float)S(68), v->level, lc);
+    RECT sw = {L.left + S(8), L.top + S(110), L.right - S(8), L.top + S(138)};
+    Txt(dc, v->level == 0 ? L"Saudável" : (v->level == 1 ? L"Atenção" : L"Com defeito"), &sw, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, lc, g_fontH);
+    RECT tt = {L.left + S(14), L.top + S(140), L.right - S(14), L.top + S(178)};
+    Txt(dc, v->title, &tt, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS, CL_DIM, g_fontVal);
+    static const wchar_t *hl[3] = {L"Leitura", L"Gravação", L"Partições"};
+    int hs[3] = {v->hRead, v->hWrite, v->hPart};
+    const wchar_t *hv[3];
+    hv[0] = v->hRead == 0 ? L"ok" : (v->hRead == 1 ? L"lenta" : L"falha");
+    hv[1] = v->hWrite == 0 ? L"ok" : (v->hWrite == 1 ? L"protegida" : (v->hWrite == 2 ? L"falha" : L"não testada"));
+    hv[2] = v->hPart == 0 ? L"ok" : (v->hPart == 1 ? L"sem tabela" : L"ilegível");
+    int ry = L.top + S(186);
+    for (int i = 0; i < 3; i++) {
+        int y = ry + i * S(26);
+        StatusDot(dc, L.left + S(26), y + S(10), S(8), hs[i]);
+        RECT a = {L.left + S(42), y, L.right - S(14), y + S(20)};
+        Txt(dc, hl[i], &a, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX, CL_TXT, g_fontVal);
+        Txt(dc, hv[i], &a, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX, CL_DIM, g_fontVal);
+    }
+    RECT ml = {L.left + S(16), bot - S(36), L.right - S(16), bot - S(20)};
+    Txt(dc, L"Mapa de leitura", &ml, DT_SINGLELINE | DT_NOPREFIX, CL_DIM, g_fontSmall);
+    DrawMiniMap(dc, L.left + S(16), bot - S(18), (L.right - L.left) - S(32), S(8), v, MAP_N);
+
+    /* ---- conteúdo ---- */
+    RECT R = {L.right + S(12), pad, w - pad, bot};
+    CardBox(dc, R, L"Conteúdo");
+    if (!v->usage) {
+        int ccx = (R.left + R.right) / 2;
+        RECT gi = {ccx - S(30), R.top + S(70), ccx + S(30), R.top + S(120)};
+        Glyph(dc, 0xE8B7, &gi, CL_DIM, g_fontIconL);
+        RECT a = {R.left + S(20), R.top + S(130), R.right - S(20), R.top + S(160)};
+        Txt(dc, L"Não deu para ler o conteúdo", &a, DT_SINGLELINE | DT_CENTER | DT_NOPREFIX, CL_TXT, g_fontH);
+        RECT b = {R.left + S(30), R.top + S(166), R.right - S(30), R.top + S(230)};
+        Txt(dc, L"O cartão não tem uma partição FAT, exFAT ou ext legível (pode estar sem partição, em NTFS ou com o sistema de arquivos danificado).", &b, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX, CL_DIM, g_fontVal);
+    } else {
+        const UsageStat *u = &v->us;
+        /* perfil */
+        int px = R.left + S(16), py = R.top + S(34);
+        Disc(dc, px + S(18), py + S(18), S(18), CL_NEON);
+        RECT pg = {px, py, px + S(36), py + S(36)};
+        Glyph(dc, ProfileGlyph(v->uProfile), &pg, g_pal.onAccent, g_fontIconM);
+        RECT pt = {px + S(46), py - S(1), R.right - S(16), py + S(19)};
+        Txt(dc, v->uTitle, &pt, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS, CL_TXT, g_fontValB);
+        static const wchar_t *fitT[4] = {L"Serve para esse uso", L"Serve com ressalvas", L"Não serve para esse uso", L"Meça o desempenho para confirmar"};
+        int fl = v->uFitLevel < 0 || v->uFitLevel > 3 ? 3 : v->uFitLevel;
+        HGDIOBJ o = SelectObject(dc, g_fontSmall);
+        SIZE ts;
+        GetTextExtentPoint32W(dc, fitT[fl], (int)wcslen(fitT[fl]), &ts);
+        SelectObject(dc, o);
+        RECT chip = {px + S(46), py + S(21), px + S(46) + ts.cx + S(30), py + S(41)};
+        COLORREF cc = fl == 0 ? g_pal.ok : fl == 1 ? g_pal.caution : fl == 2 ? CL_DANGER : CL_DIM;
+        COLORREF cb = fl == 0 ? g_pal.okBg : fl == 1 ? g_pal.cautionBg : fl == 2 ? g_pal.warnBg : g_pal.navHot;
+        RRect(dc, chip, S(10), cb, CL_NONE);
+        StatusDot(dc, chip.left + S(10), (chip.top + chip.bottom) / 2, S(6), fl == 3 ? 3 : fl);
+        RECT ct = {chip.left + S(20), chip.top, chip.right - S(6), chip.bottom};
+        Txt(dc, fitT[fl], &ct, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX, cc, g_fontSmall);
+
+        /* rosca: o cartão inteiro */
+        float r = (float)S(66), dcx = (float)(R.left + S(24)) + r, dcy = (float)(R.top + S(92)) + r;
+        double cap = (double)(v->uCard ? v->uCard : 1);
+        float a = -90.0f;
+        int order[CT_N];
+        for (int i = 0; i < CT_N; i++) order[i] = i;
+        for (int i = 0; i < CT_N; i++)
+            for (int k = i + 1; k < CT_N; k++)
+                if (u->catBytes[order[k]] > u->catBytes[order[i]]) { int t = order[i]; order[i] = order[k]; order[k] = t; }
+        PieSeg(dc, dcx, dcy, r, 0, 360, g_pal.btnEdge);
+        for (int i = 0; i < CT_N; i++) {
+            int c = order[i];
+            if (!u->catBytes[c]) continue;
+            float sw2 = (float)(360.0 * (double)u->catBytes[c] / cap);
+            if (sw2 < 1.5f) sw2 = 1.5f;
+            PieSeg(dc, dcx, dcy, r, a, sw2, CatColor(c));
+            a += sw2;
+        }
+        uint64_t freeIn = u->scannedBytes > u->usedBytes ? u->scannedBytes - u->usedBytes : 0;
+        float fsw = (float)(360.0 * (double)freeIn / cap);
+        if (a + fsw > 270.0f) fsw = 270.0f - a;
+        PieSeg(dc, dcx, dcy, r, a, fsw, g_pal.empty);
+        Disc(dc, (int)dcx, (int)dcy, (int)(r * 0.64f), CL_BG);
+        int pct = v->uCard ? (int)(u->usedBytes * 100 / v->uCard) : 0;
+        wchar_t pc[16];
+        _snwprintf(pc, 15, L"%d%%", pct);
+        pc[15] = 0;
+        RECT c1 = {(int)(dcx - r), (int)dcy - S(22), (int)(dcx + r), (int)dcy + S(10)};
+        Txt(dc, pc, &c1, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, CL_TXT, g_fontTitle);
+        RECT c2 = {(int)(dcx - r), (int)dcy + S(8), (int)(dcx + r), (int)dcy + S(26)};
+        Txt(dc, L"ocupado", &c2, DT_SINGLELINE | DT_CENTER | DT_NOPREFIX, CL_DIM, g_fontSmall);
+        wchar_t a1[32], b1[32], line[120];
+        FmtSize(u->usedBytes, a1, 32);
+        FmtSize(v->uCard, b1, 32);
+        _snwprintf(line, 119, L"%ls de %ls", a1, b1);
+        line[119] = 0;
+        RECT u1 = {(int)(dcx - r - S(20)), (int)(dcy + r) + S(6), (int)(dcx + r + S(20)), (int)(dcy + r) + S(24)};
+        Txt(dc, line, &u1, DT_SINGLELINE | DT_CENTER | DT_NOPREFIX, CL_TXT, g_fontValB);
+        _snwprintf(line, 119, L"%u arquivos · %u pastas", (unsigned)u->files, (unsigned)u->dirs);
+        line[119] = 0;
+        RECT u2 = {(int)(dcx - r - S(20)), (int)(dcy + r) + S(24), (int)(dcx + r + S(20)), (int)(dcy + r) + S(42)};
+        Txt(dc, line, &u2, DT_SINGLELINE | DT_CENTER | DT_NOPREFIX, CL_DIM, g_fontSmall);
+
+        /* legenda com ícones */
+        int lx = (int)(dcx + r) + S(26), lw = R.right - S(16) - lx, ly = R.top + S(94), shown = 0;
+        for (int i = 0; i < CT_N && shown < 6; i++) {
+            int c = order[i];
+            if (!u->catFiles[c]) continue;
+            int y = ly + shown * S(33);
+            RECT gi = {lx, y, lx + S(22), y + S(20)};
+            Glyph(dc, CatGlyph(c), &gi, CatColor(c), g_fontIcon);
+            wchar_t nm[96], sz[32];
+            FmtSize(u->catBytes[c], sz, 32);
+            _snwprintf(nm, 95, L"%ls · %u", CatName(c), (unsigned)u->catFiles[c]);
+            nm[95] = 0;
+            RECT tn = {lx + S(28), y, lx + lw - S(70), y + S(20)};
+            Txt(dc, nm, &tn, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, CL_TXT, g_fontVal);
+            RECT tsz = {lx + lw - S(70), y, lx + lw, y + S(20)};
+            Txt(dc, sz, &tsz, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX, CL_TXT, g_fontValB);
+            int bw = lw - S(28);
+            RECT bk = {lx + S(28), y + S(22), lx + S(28) + bw, y + S(26)};
+            RRect(dc, bk, S(2), g_pal.btnEdge, CL_NONE);
+            double f = u->usedBytes ? (double)u->catBytes[c] / (double)u->usedBytes : 0;
+            RECT bf = {lx + S(28), y + S(22), lx + S(28) + (int)(bw * f) + S(4), y + S(26)};
+            RRect(dc, bf, S(2), CatColor(c), CL_NONE);
+            shown++;
+        }
+        /* extensões mais comuns */
+        int ex = R.left + S(16), ey = bot - S(36);
+        RECT el = {ex, ey - S(20), R.right - S(16), ey - S(4)};
+        Txt(dc, L"Extensões mais comuns", &el, DT_SINGLELINE | DT_NOPREFIX, CL_DIM, g_fontSmall);
+        o = SelectObject(dc, g_fontSmall);
+        for (int i = 0; i < u->next && i < 8; i++) {
+            wchar_t e[40];
+            _snwprintf(e, 39, L".%hs  %u", u->ext[i].ext, (unsigned)u->ext[i].files);
+            e[39] = 0;
+            GetTextExtentPoint32W(dc, e, (int)wcslen(e), &ts);
+            int cw = ts.cx + S(18);
+            if (ex + cw > R.right - S(16)) break;
+            RECT p = {ex, ey, ex + cw, ey + S(22)};
+            RRect(dc, p, S(11), g_pal.navHot, CL_NONE);
+            RECT d2 = {p.left + S(4), p.top, p.left + S(10), p.bottom};
+            Disc(dc, p.left + S(9), (p.top + p.bottom) / 2, S(3), CatColor(u->ext[i].cat));
+            (void)d2;
+            RECT pt2 = {p.left + S(14), p.top, p.right, p.bottom};
+            SetTextColor(dc, CL_TXT);
+            SetBkMode(dc, TRANSPARENT);
+            DrawTextW(dc, e, -1, &pt2, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+            ex += cw + S(6);
+        }
+        SelectObject(dc, o);
+    }
+
+    /* ---- próximo passo ---- */
+    RECT B = {pad, h - S(54), w - pad, h - pad};
+    RRect(dc, B, S(8), g_pal.navSel, CL_NONE);
+    RECT ai = {B.left + S(12), B.top, B.left + S(36), B.bottom};
+    Glyph(dc, 0xE72A, &ai, CL_NEON, g_fontIconM);
+    RECT at = {B.left + S(44), B.top, B.left + S(160), B.bottom};
+    Txt(dc, L"Próximo passo", &at, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX, CL_TXT, g_fontValB);
+    RECT ah = {B.left + S(160), B.top, B.right - S(14), B.bottom};
+    Txt(dc, NextHint(v), &ah, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, CL_TXT, g_fontVal);
+}
+
+/* tela inicial do Diagnóstico */
+static void DrawHero(HDC dc, int w, int h) {
+    int cx = w / 2;
+    DiskInfo *di = FindDisk(SelectedDisk(ID_COMBO1));
+    BOOL has = di != NULL;
+    float cw = (float)S(84), ch = (float)S(108);
+    float pulse = 0;
+    if (!has) pulse = (float)((GetTickCount64() / 20) % 100) / 100.0f;
+    SdCardIcon(dc, cx - cw / 2, (float)S(30), cw, ch, has ? CL_NEON : g_pal.btnEdge, has ? g_pal.onAccent : CL_PANEL);
+    if (has) StatusDot(dc, (int)(cx + cw / 2), S(30) + (int)ch, S(13), 0);
+    (void)pulse;
+    RECT t1 = {S(20), S(156), w - S(20), S(190)};
+    Txt(dc, has ? L"Cartão pronto para o diagnóstico" : L"Insira um cartão SD", &t1, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, CL_TXT, g_fontTitle);
+    RECT t2 = {S(20), S(194), w - S(20), S(214)};
+    wchar_t s[400];
+    if (has) {
+        wchar_t sz[32];
+        FmtSize(di->size, sz, 32);
+        _snwprintf(s, 399, L"%ls %ls · %ls%ls%ls%ls", di->vendor, di->product, sz, di->letters[0] ? L" · unidade " : L"", di->letters, g_ndisks > 1 ? L"   (há outro cartão: escolha na lista acima)" : L"");
+    } else wcscpy(s, L"Assim que o cartão for conectado, ele aparece aqui sozinho.");
+    s[399] = 0;
+    Txt(dc, s, &t2, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS, CL_DIM, g_fontVal);
+    if (has) {
+        RECT t3 = {S(20), S(300), w - S(20), S(320)};
+        Txt(dc, L"Leva cerca de 1 minuto e não apaga nada.", &t3, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, CL_DIM, g_fontSmall);
+    }
+    /* o que o diagnóstico mostra */
+    int fy = h - S(118), fw = (w - S(64)) / 3;
+    static const wchar_t *ft[3] = {L"Saúde do cartão", L"O que tem dentro", L"O que fazer depois"};
+    static const wchar_t *fd[3] = {L"Leitura, gravação e partições", L"Jogos, fotos, música e mais", L"Backup, reparo ou próximo teste"};
+    RECT sep = {S(32), fy - S(14), w - S(32), fy - S(13)};
+    Fill(dc, sep, CL_EDGE);
+    for (int i = 0; i < 3; i++) {
+        int x0 = S(32) + i * fw, ic = x0 + fw / 2;
+        if (i == 0) ShieldIcon(dc, (float)ic, (float)fy, (float)S(26), (float)S(30), 0, g_pal.ok);
+        else if (i == 1) {
+            PieSeg(dc, (float)ic, (float)(fy + S(15)), (float)S(15), -90, 360, g_pal.btnEdge);
+            PieSeg(dc, (float)ic, (float)(fy + S(15)), (float)S(15), -90, 150, CL_NEON);
+            PieSeg(dc, (float)ic, (float)(fy + S(15)), (float)S(15), 60, 70, CatColor(CT_MUSIC));
+            Disc(dc, ic, fy + S(15), S(8), CL_PANEL);
+        } else {
+            Disc(dc, ic, fy + S(15), S(15), CL_NEON);
+            RECT gi = {ic - S(15), fy, ic + S(15), fy + S(30)};
+            Glyph(dc, 0xE72A, &gi, g_pal.onAccent, g_fontIcon);
+        }
+        RECT a = {x0, fy + S(38), x0 + fw, fy + S(58)};
+        Txt(dc, ft[i], &a, DT_SINGLELINE | DT_CENTER | DT_NOPREFIX, CL_TXT, g_fontValB);
+        RECT b = {x0, fy + S(58), x0 + fw, fy + S(76)};
+        Txt(dc, fd[i], &b, DT_SINGLELINE | DT_CENTER | DT_NOPREFIX | DT_END_ELLIPSIS, CL_DIM, g_fontSmall);
+    }
+}
+
+/* animação durante o diagnóstico */
+static void DrawDiagBusy(HDC dc, int w, int h, const Verdict *v) {
+    (void)h;
+    /* cartão com linha de leitura passando */
+    float cw = (float)S(96), ch = (float)S(124), l = (float)S(70), t = (float)S(50);
+    SdCardIcon(dc, l, t, cw, ch, CL_NEON, g_pal.onAccent);
+    float ph = (float)((GetTickCount64() / 12) % 100) / 100.0f;
+    float y = t + ch * 0.32f + (ch * 0.62f) * (ph < 0.5f ? ph * 2 : (1 - ph) * 2);
+    LineSeg(dc, l - S(10), y, l + cw + S(10), y, (float)S(3), g_pal.onAccent);
+    LineSeg(dc, l - S(10), y, l + cw + S(10), y, (float)S(1), CL_TXT);
+    RECT tl = {S(20), S(196), S(236), S(220)};
+    Txt(dc, L"Analisando...", &tl, DT_SINGLELINE | DT_CENTER | DT_NOPREFIX, CL_DIM, g_fontVal);
+
+    int x0 = S(270), y0 = S(36);
+    RECT hd = {x0, y0 - S(6), w - S(20), y0 + S(24)};
+    Txt(dc, L"Diagnóstico em andamento", &hd, DT_SINGLELINE | DT_NOPREFIX, CL_TXT, g_fontH);
+    static const wchar_t *st[5] = {L"Lendo a tabela de partições", L"Lendo 128 pontos do cartão", L"Testando a gravação", L"Lendo o conteúdo", L"Montando o relatório"};
+    int cur = (int)g_step;
+    for (int i = 0; i < 5; i++) {
+        int yy = y0 + S(44) + i * S(40);
+        int ccx = x0 + S(11), ccy = yy + S(10);
+        if (i < cur) StatusDot(dc, ccx, ccy, S(10), 0);
+        else if (i == cur) Spinner(dc, ccx, ccy, S(9), (float)S(3));
+        else ArcLine(dc, (float)ccx, (float)ccy, (float)S(9), 0, 360, (float)S(2), g_pal.btnEdge);
+        RECT a = {x0 + S(32), yy, w - S(20), yy + S(20)};
+        Txt(dc, st[i], &a, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX, i <= cur ? CL_TXT : CL_DIM, i == cur ? g_fontValB : g_fontVal);
+        if (i == cur && (i == 1 || i == 3)) {
+            if (i == 1) DrawMiniMap(dc, x0 + S(32), yy + S(24), w - x0 - S(56), S(8), v, (int)g_mapDone);
+            else {
+                wchar_t ph2[200];
+                EnterCriticalSection(&g_cs);
+                wcscpy(ph2, g_phase);
+                LeaveCriticalSection(&g_cs);
+                RECT b = {x0 + S(32), yy + S(20), w - S(20), yy + S(38)};
+                Txt(dc, ph2, &b, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS, CL_DIM, g_fontSmall);
+            }
+        }
+    }
+}
+
+/* animação genérica (Desempenho, Proteção) */
+static void DrawBusyGeneric(HDC dc, int w, int h) {
+    Spinner(dc, w / 2, h / 2 - S(30), S(22), (float)S(4));
+    wchar_t ph2[200];
+    EnterCriticalSection(&g_cs);
+    wcscpy(ph2, g_phase);
+    LeaveCriticalSection(&g_cs);
+    RECT a = {S(20), h / 2 + S(6), w - S(20), h / 2 + S(32)};
+    Txt(dc, ph2[0] ? ph2 : L"Trabalhando...", &a, DT_SINGLELINE | DT_CENTER | DT_NOPREFIX | DT_END_ELLIPSIS, CL_TXT, g_fontVal);
+    RECT b = {S(20), h / 2 + S(34), w - S(20), h / 2 + S(54)};
+    Txt(dc, g_op == OP_BENCH ? L"Leva até 1 minuto. Não retire o cartão." : L"Não retire o cartão.", &b, DT_SINGLELINE | DT_CENTER | DT_NOPREFIX, CL_DIM, g_fontSmall);
+}
+
 static void DrawResult(DRAWITEMSTRUCT *d) {
     int w = d->rcItem.right - d->rcItem.left, h = d->rcItem.bottom - d->rcItem.top;
     HDC dc = CreateCompatibleDC(d->hDC);
@@ -778,62 +1180,28 @@ static void DrawResult(DRAWITEMSTRUCT *d) {
     HGDIOBJ ob = SelectObject(dc, bm);
     RECT r = {0, 0, w, h};
     Fill(dc, r, CL_BG);
-    RRect(dc, r, S(6), CL_PANEL, CL_EDGE);
+    RRect(dc, r, S(8), CL_PANEL, CL_EDGE);
     const Verdict *v = &g_vd;
-    if (!v->valid || v->op != g_op) {
+    if (g_busy && g_op == OP_DIAG) DrawDiagBusy(dc, w, h, v);
+    else if (g_busy) DrawBusyGeneric(dc, w, h);
+    else if (IsHero()) DrawHero(dc, w, h);
+    else if (!v->valid || v->op != g_op) {
         RECT tr = {S(24), 0, w - S(24), h};
         Txt(dc, g_op == OP_CSD ? L"Escolha como acessar o cartão e clique em Ler proteção. O resultado aparece aqui."
                 : g_op == OP_BENCH ? L"Escolha o cartão e clique em Medir desempenho. O resultado aparece aqui."
                                    : L"Escolha o cartão e clique em Analisar cartão. O resultado aparece aqui.", &tr,
             DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, CL_DIM, g_font);
+    } else if (v->op == OP_DIAG) {
+        DrawDiagResult(dc, w, h, v);
     } else {
-        BOOL tabs = (v->op == OP_DIAG && v->usage);
         int y0 = S(16);
-        if (tabs) { DrawTabs(dc, w); y0 = S(TAB_H) + S(12); }
-        if (tabs && g_resTab == 1) {
-            DrawUsage(dc, w, h, v, y0);
-        } else {
-            DrawBanner(dc, w, y0, v->level, v->title);
-            static const wchar_t *lab[4] = {L"Causa provável", L"O cartão tem conserto?", L"Dá para salvar os dados?", L"O que fazer agora"};
-            static const wchar_t *labB[4] = {L"Velocidade medida", L"Acesso aleatório (4 KB)", L"Classe estimada", L"Serve para"};
-            const wchar_t *val[4] = {v->cause, v->card, v->data, v->todo};
-            int mapTop = v->bench ? h - S(150) : (v->map ? h - S(70) : h - S(10));
-            DrawRows(dc, w, y0 + S(44) + S(14), mapTop - S(6), v->bench ? labB : lab, val, 4);
-            if (v->bench) DrawBenchChart(dc, w, mapTop, S(150), v);
-            /* mapa de leitura */
-            if (v->map) {
-                RECT sl = {S(20), mapTop, w - S(20), mapTop + 1};
-                Fill(dc, sl, CL_EDGE);
-                RECT ml = {S(20), mapTop + S(10), w - S(20), mapTop + S(26)};
-                Txt(dc, L"Mapa de leitura: 128 pontos do início ao fim do cartão", &ml, DT_SINGLELINE | DT_NOPREFIX, CL_DIM, g_fontSmall);
-                int bx = S(20), bw = w - S(40), by = mapTop + S(30), bh = S(10);
-                for (int i = 0; i < MAP_N; i++) {
-                    RECT c = {bx + bw * i / MAP_N, by, bx + bw * (i + 1) / MAP_N, by + bh};
-                    if (c.right - c.left > 3) c.right -= 1;
-                    Fill(dc, c, MapColor(v->cell[i]));
-                }
-                static const wchar_t *ln[5] = {L"Com dados", L"Vazio", L"Lento", L"Ilegível", L"Não lido"};
-                int cnt[5] = {v->nData, v->nEmpty, v->nSlow, v->nBad, v->nSkip};
-                int lx2 = S(20), ly = by + bh + S(8);
-                HGDIOBJ o = SelectObject(dc, g_fontSmall);
-                for (int i = 0; i < 5; i++) {
-                    if (i == MC_SKIP && cnt[i] == 0) continue;
-                    wchar_t s[48];
-                    _snwprintf(s, 47, L"%ls %d", ln[i], cnt[i]);
-                    s[47] = 0;
-                    RECT sq = {lx2, ly + S(3), lx2 + S(10), ly + S(13)};
-                    Fill(dc, sq, MapColor(i));
-                    SIZE ts;
-                    GetTextExtentPoint32W(dc, s, (int)wcslen(s), &ts);
-                    RECT tr = {lx2 + S(15), ly, lx2 + S(15) + ts.cx + 2, ly + S(16)};
-                    SetTextColor(dc, CL_DIM);
-                    SetBkMode(dc, TRANSPARENT);
-                    DrawTextW(dc, s, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-                    lx2 = tr.right + S(22);
-                }
-                SelectObject(dc, o);
-            }
-        }
+        DrawBanner(dc, w, y0, v->level, v->title);
+        static const wchar_t *lab[4] = {L"Causa provável", L"O cartão tem conserto?", L"Dá para salvar os dados?", L"O que fazer agora"};
+        static const wchar_t *labB[4] = {L"Velocidade medida", L"Acesso aleatório (4 KB)", L"Classe estimada", L"Serve para"};
+        const wchar_t *val[4] = {v->cause, v->card, v->data, v->todo};
+        int mapTop = v->bench ? h - S(150) : h - S(10);
+        DrawRows(dc, w, y0 + S(44) + S(14), mapTop - S(6), v->bench ? labB : lab, val, 4);
+        if (v->bench) DrawBenchChart(dc, w, mapTop, S(150), v);
     }
     BitBlt(d->hDC, d->rcItem.left, d->rcItem.top, w, h, dc, 0, 0, SRCCOPY);
     SelectObject(dc, ob);
@@ -841,25 +1209,50 @@ static void DrawResult(DRAWITEMSTRUCT *d) {
     DeleteDC(dc);
 }
 
-/* clique nas abas do resultado */
-static LRESULT CALLBACK ResSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR ref) {
-    (void)ref;
-    BOOL tabsOn = (g_vd.valid && g_vd.op == OP_DIAG && g_vd.usage && g_op == OP_DIAG);
-    if (m == WM_NCHITTEST) return HTCLIENT;
-    if (m == WM_SETCURSOR && tabsOn) {
-        POINT pt;
-        GetCursorPos(&pt);
-        ScreenToClient(h, &pt);
-        RECT a, b;
-        TabRects(&a, &b);
-        if (PtInRect(&a, pt) || PtInRect(&b, pt)) { SetCursor(LoadCursor(NULL, IDC_HAND)); return TRUE; }
+/* trilha da jornada no topo (Diagnóstico -> Autenticidade -> Desempenho) */
+static void DrawSteps(DRAWITEMSTRUCT *d) {
+    int w = d->rcItem.right - d->rcItem.left, h = d->rcItem.bottom - d->rcItem.top;
+    HDC dc = CreateCompatibleDC(d->hDC);
+    HBITMAP bm = CreateCompatibleBitmap(d->hDC, w, h);
+    HGDIOBJ ob = SelectObject(dc, bm);
+    RECT r = {0, 0, w, h};
+    Fill(dc, r, CL_BG);
+    static const wchar_t *nm[3] = {L"Diagnóstico", L"Autenticidade", L"Desempenho"};
+    int sw = w / 3, cy = h / 2, rad = S(11);
+    for (int i = 0; i < 3; i++) {
+        int x = i * sw + rad + S(2);
+        if (i < 2) {
+            RECT ln = {x + rad + S(4) + S(96), cy, (i + 1) * sw + S(2) - S(4), cy + S(2)};
+            if (ln.right > ln.left) Fill(dc, ln, JourneyDone(i) ? g_pal.ok : g_pal.btnEdge);
+        }
+        BOOL done = JourneyDone(i), cur = (g_op == JOURNEY_OP[i]);
+        if (done) StatusDot(dc, x, cy, rad, 0);
+        else {
+            Disc(dc, x, cy, rad, cur ? CL_NEON : g_pal.btnEdge);
+            if (!cur) Disc(dc, x, cy, rad - S(2), CL_BG);
+            wchar_t n[2] = {(wchar_t)(L'1' + i), 0};
+            RECT nr = {x - rad, cy - rad, x + rad, cy + rad};
+            Txt(dc, n, &nr, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, cur ? g_pal.onAccent : CL_DIM, g_fontSmall);
+        }
+        RECT tr = {x + rad + S(6), 0, x + rad + S(6) + S(96), h};
+        Txt(dc, nm[i], &tr, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX, cur ? CL_TXT : CL_DIM, cur ? g_fontValB : g_fontVal);
     }
-    if (m == WM_LBUTTONDOWN && tabsOn) {
-        POINT pt = {(short)LOWORD(l), (short)HIWORD(l)};
-        RECT a, b;
-        TabRects(&a, &b);
-        int t = PtInRect(&a, pt) ? 0 : (PtInRect(&b, pt) ? 1 : -1);
-        if (t >= 0 && t != g_resTab) { g_resTab = t; InvalidateRect(h, NULL, FALSE); }
+    BitBlt(d->hDC, d->rcItem.left, d->rcItem.top, w, h, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, ob);
+    DeleteObject(bm);
+    DeleteDC(dc);
+}
+
+static void ApplyOp(int op);
+static LRESULT CALLBACK StepsSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR ref) {
+    (void)ref; (void)id;
+    if (m == WM_NCHITTEST) return HTCLIENT;
+    if (m == WM_SETCURSOR) { SetCursor(LoadCursor(NULL, g_busy ? IDC_ARROW : IDC_HAND)); return TRUE; }
+    if (m == WM_LBUTTONUP && !g_busy) {
+        RECT rc;
+        GetClientRect(h, &rc);
+        int x = (short)LOWORD(l), i = x * 3 / (rc.right > 0 ? rc.right : 1);
+        if (i >= 0 && i < 3 && JOURNEY_OP[i] != g_op) ApplyOp(JOURNEY_OP[i]);
         return 0;
     }
     return DefSubclassProc(h, m, w, l);
@@ -2050,6 +2443,14 @@ static void BuildFitText(Verdict *v, int disk, uint64_t size) {
         else wcscat(t, L"Sem uso definido. Rode Desempenho para saber para que o cartão presta.");
     }
     VS(uFit, L"%ls", t);
+    int fl = 3;
+    if (p == UP_GAMES || p == UP_CONSOLE) { if (bm) fl = g_bm.bj.game == 2 ? 0 : (g_bm.bj.game == 1 ? 1 : 2); }
+    else if (p == UP_CAMERA || p == UP_VIDEO) { if (bm && g_bm.bj.media >= 0) fl = g_bm.bj.media >= 2 ? 0 : (g_bm.bj.media == 1 ? 1 : 2); }
+    else if (p == UP_MUSIC || p == UP_DOCS) fl = (bm && g_bm.bj.trust == BT_BAD) ? 1 : 0;
+    else if (bm) fl = g_bm.bj.trust == BT_OK ? 0 : 1;
+    if (v->level >= 2) fl = 2;
+    else if (v->level == 1 && fl != 2) fl = 1;
+    v->uFitLevel = fl;
 }
 
 static void ScanContent(Job *j, HANDLE hd, Verdict *v) {
@@ -2121,6 +2522,8 @@ static BOOL DoHealth(Job *j) {
 
     if (opened) {
         /* 1. tabela de partições */
+        g_step = 0;
+        g_mapDone = 0;
         SetIndet(L"Lendo a tabela de partições...");
         if (ReadAtRaw(hd, 0, buf, sec * 2 <= blk ? sec * 2 : blk)) {
             r0 = TRUE;
@@ -2132,6 +2535,7 @@ static BOOL DoHealth(Job *j) {
         Log(!r0 ? L"Não foi possível ler o início do cartão." : (gpt ? L"Tabela de partições: GPT." : (mbr ? L"Tabela de partições: MBR." : L"Tabela de partições: nenhuma (cartão RAW).")));
 
         /* 2. leitura por amostragem */
+        g_step = 1;
         SetPhase(L"Lendo pontos de todo o cartão", (uint64_t)MAP_N * blk);
         int fails = 0;
         for (int i = 0; i < MAP_N; i++) {
@@ -2146,6 +2550,7 @@ static BOOL DoHealth(Job *j) {
             else if (IsFill(buf, blk, 0) || IsFill(buf, blk, 0xFF)) v->cell[i] = MC_EMPTY;
             else v->cell[i] = MC_DATA;
             g_done += blk;
+            g_mapDone = i + 1;
         }
         if (g_cancel) { Log(L"Diagnóstico cancelado."); goto out; }
         if (fails >= 12) Log(L"Muitos pontos ilegíveis seguidos; o restante do mapa não foi lido para não travar.");
@@ -2165,6 +2570,7 @@ static BOOL DoHealth(Job *j) {
 
     /* 3. teste de gravação (devolve o conteúdo original) */
     if (opened && j->verify && readable > 0 && tl * 1 <= blk && !g_cancel) {
+        g_step = 2;
         SetIndet(L"Testando a gravação...");
         if (!LockDiskVolumes(j->src, &vs)) {
             Log(L"Aviso: não foi possível travar as partições do cartão; o teste de gravação foi pulado. Feche programas que usam o cartão.");
@@ -2208,7 +2614,9 @@ static BOOL DoHealth(Job *j) {
         Log(L"Teste de gravação desmarcado.");
 
     /* conteúdo do cartão: ocupação, tipos de arquivo e perfil de uso */
+    g_step = 3;
     if (opened && readable > 0 && !g_cancel) ScanContent(j, hd, v);
+    g_step = 4;
     if (g_cancel) { Log(L"Diagnóstico cancelado."); goto out; }
 
     /* registro CID (só leitores SD internos expõem) */
@@ -2319,8 +2727,11 @@ static BOOL DoHealth(Job *j) {
         VS(data, L"Não há sinal de perda de dados.");
         VS(todo, L"Para saber se a capacidade é real, use Autenticidade com o teste completo.%ls%ls", capNote, wr < 0 ? L" O teste de gravação não foi feito." : L"");
     }
+    /* saúde resumida para os ícones */
+    v->hRead = (!opened || readable == 0 || v->nBad > 0) ? 2 : ((v->nSlow * 10 >= tested && v->nSlow > 0) ? 1 : 0);
+    v->hWrite = wr < 0 ? 3 : (wr == 0 ? 0 : ((wr == 1 && wrErr == ERROR_WRITE_PROTECT) ? 1 : 2));
+    v->hPart = !r0 ? 2 : ((mbr || gpt) ? 0 : 1);
     if (v->usage) BuildFitText(v, j->src, size);
-    g_resTab = 0;
     Log(L"Resultado: %ls.", v->title);
     v->valid = TRUE;
 out:
@@ -3176,9 +3587,22 @@ static void Relayout(void) {
     g_cardBot = y - gap + CARD_PAD;
     int ay = g_cardBot + 16;
     if (g_resView) { g_cardBot = 0; ay = TASK_Y; }
+    Place(ID_TITLE, MX, 18, 330, 40);
+    Place(ID_STEPS, MX + MW - 400, 24, 400, 32);
+    if (IsHero()) {
+        /* tela inicial do Diagnóstico: botão grande no meio do painel */
+        g_areaTop = TASK_Y;
+        int ah0 = WIN_H - 16 - g_areaTop;
+        Place(ID_RESULT, MX, g_areaTop, MW, ah0);
+        Place(ID_LOG, MX + 10, g_areaTop + 8, MW - 20, ah0 - 16);
+        Place(ID_START, MX + (MW - 280) / 2, g_areaTop + 238, 280, 48);
+        Place(ID_OPTS, MX + (MW - 150) / 2, g_areaTop + 326, 150, 28);
+        InvalidateRect(g_hwnd, NULL, TRUE);
+        return;
+    }
     Place(ID_START, MX, ay, 180, 32);
     Place(ID_CANCELBTN, MX + 188, ay, 110, 32);
-    Place(ID_NEXT, MX + 188, ay, 200, 32); /* no lugar do Cancelar, que some quando nada está rodando */
+    Place(ID_NEXT, MX + 188, ay, 210, 32); /* no lugar do Cancelar, que some quando nada está rodando */
     Place(ID_LOGBTN, MX + MW - 170, ay, 170, 32);
     Place(ID_OPTS, MX + MW - 170 - 150, ay, 150, 32);
     Place(ID_PROGRESS, MX, ay + 44, MW, 4);
@@ -3193,20 +3617,30 @@ static void Relayout(void) {
 
 /* área inferior: no Diagnóstico alterna entre o veredito e o registro técnico; nas outras tarefas mostra o registro */
 static void ShowArea(void) {
+    static int lastHero = -1;
+    BOOL hero = IsHero();
+    if ((int)hero != lastHero) { lastHero = hero; Relayout(); }
     BOOL diag = IS_VIEW(g_op);
-    BOOL log = !diag || g_showLog;
+    BOOL log = !hero && (!diag || g_showLog);
     BOOL rv = diag && g_resView;
     if (rv)
         for (int i = 0; i < (int)(sizeof TASK_CTLS / sizeof TASK_CTLS[0]); i++) ShowCtl(TASK_CTLS[i], FALSE);
+    int nxc = NextFor();
+    BOOL nx = nxc != NX_NONE && !hero;
     ShowCtl(ID_OPTS, rv && !g_busy);
-    ShowCtl(ID_CANCELBTN, !diag || g_busy);
+    ShowCtl(ID_CANCELBTN, !hero && (g_busy || (!diag && !nx)));
     ShowCtl(ID_RESULT, !log);
     ShowCtl(ID_LOG, log);
-    ShowCtl(ID_LOGBTN, diag);
+    ShowCtl(ID_LOGBTN, diag && !hero);
+    ShowCtl(ID_PROGRESS, !hero);
+    ShowCtl(ID_STATUS, !hero);
+    ShowCtl(ID_STEPS, g_op == OP_DIAG || g_op == OP_AUTH || g_op == OP_BENCH);
+    InvalidateRect(Ctl(ID_STEPS), NULL, FALSE);
     SetDlgItemTextW(g_hwnd, ID_LOGBTN, log ? L"Ver resultado" : L"Ver registro técnico");
-    BOOL nx = diag && !g_busy && g_vd.valid && g_vd.op == g_op && g_vd.next != NX_NONE;
-    if (nx) SetDlgItemTextW(g_hwnd, ID_NEXT, NX_TEXT[g_vd.next]);
+    if (g_op == OP_DIAG) SetDlgItemTextW(g_hwnd, ID_START, g_busy ? L"Analisando..." : (hero ? L"Iniciar diagnóstico" : L"Analisar de novo"));
+    if (nx) SetDlgItemTextW(g_hwnd, ID_NEXT, NX_TEXT[nxc]);
     ShowCtl(ID_NEXT, nx);
+    InvalidateRect(Ctl(ID_START), NULL, FALSE);
     InvalidateRect(Ctl(ID_RESULT), NULL, FALSE);
     InvalidateRect(Ctl(ID_LOGBTN), NULL, FALSE);
     InvalidateRect(Ctl(ID_NEXT), NULL, FALSE);
@@ -3325,9 +3759,11 @@ static void ApplyOp(int op) {
         L"Descobre o defeito do cartão, se ele tem conserto e se os dados podem ser salvos.",
         L"Lê os registros internos do cartão (CID e CSD) e mostra se a gravação está travada por um bit de proteção, por senha ou pelo firmware.",
         L"Mede a velocidade de leitura e gravação, sequencial e de 4 KB, e diz se o cartão serve para game stick, fotos e vídeo ou se é um cartão genérico em que não dá para confiar."};
+    if (op != g_op) g_diagForm = FALSE;
+    if (op == OP_DIAG && !(g_vd.valid && g_vd.op == OP_DIAG)) g_showLog = FALSE;
     g_op = op;
     g_hover = 0;
-    g_resView = FALSE;
+    g_resView = (op == OP_DIAG && !g_diagForm);
     RedrawNav();
     ShowCtl(ID_DESC, TRUE);
     SetDlgItemTextW(g_hwnd, ID_TITLE, NAV_T[op]);
@@ -3413,9 +3849,10 @@ static void ApplyOp(int op) {
 }
 
 static void OnNext(void) {
-    switch (g_vd.next) {
+    switch (NextFor()) {
     case NX_BACKUP: ApplyOp(OP_C2I); break;
     case NX_AUTH: ApplyOp(OP_AUTH); break;
+    case NX_BENCH: ApplyOp(OP_BENCH); break;
     case NX_CARVE:
     case NX_REBUILD:
     case NX_RESTORE:
@@ -3486,10 +3923,12 @@ static BOOL Confirm(const wchar_t *t) {
 }
 
 static void StartJob(void) {
+    if (g_demo[0]) { Warn(L"Modo demonstração: nenhuma operação é feita no disco."); return; }
     g_cancel = 0; g_done = 0; g_total = 0; g_indet = 0;
     g_summary[0] = 0;
-    if (IS_VIEW(g_op)) { g_vd.valid = FALSE; g_showLog = TRUE; g_resView = TRUE; Relayout(); }
+    if (IS_VIEW(g_op)) { g_vd.valid = FALSE; g_showLog = FALSE; g_resView = TRUE; g_diagForm = FALSE; g_step = 0; g_mapDone = 0; }
     SetBusy(TRUE);
+    if (IS_VIEW(g_op)) Relayout();
     SetDlgItemTextW(g_hwnd, ID_STATUS, L"Iniciando...");
     g_t0 = GetTickCount64();
     g_thread = CreateThread(NULL, 0, Worker, NULL, 0, NULL);
@@ -3665,6 +4104,14 @@ static void OnDone(BOOL ok) {
     SetDlgItemTextW(g_hwnd, ID_STATUS, ok ? L"Concluído." : L"Não concluído — veja o registro abaixo.");
     SetBusy(FALSE);
     RefreshDisks();
+    {
+        int jd = g_job.src;
+        if (jd != g_jdisk) { g_jdisk = jd; memset(g_jdone, 0, sizeof g_jdone); }
+        if (g_job.op == OP_DIAG && g_vd.valid) g_jdone[0] = TRUE;
+        if (g_job.op == OP_AUTH && ok) g_jdone[1] = TRUE;
+        if (g_job.op == OP_BENCH && g_vd.valid) g_jdone[2] = TRUE;
+    }
+    ShowArea();
     if (IS_VIEW(g_job.op)) { g_showLog = !g_vd.valid; ShowArea(); }
     FlashWindow(g_hwnd, TRUE);
     if (g_summary[0]) MessageBoxW(g_hwnd, g_summary, APP_TITLE, MB_OK | g_summaryIcon);
@@ -3730,6 +4177,7 @@ static void CreateUi(void) {
 
     /* título da página */
     mk(L"STATIC", L"", SS_LEFT | SS_NOPREFIX, MX, 18, MW, 40, ID_TITLE, 0);
+    mk(L"STATIC", L"", SS_OWNERDRAW, MX + MW - 420, 24, 420, 32, ID_STEPS, 0);
 
     /* cartão do dispositivo e campos da tarefa (posições finais vêm de Relayout) */
     mk(L"STATIC", L"Cartão", SS_LEFT | SS_NOPREFIX, 0, 0, 100, 18, ID_LBL1, 0);
@@ -3763,7 +4211,7 @@ static void CreateUi(void) {
     HWND pb = mk(PROGRESS_CLASSW, L"", 0, 0, 0, MW, 4, ID_PROGRESS, 0);
     SendMessageW(pb, PBM_SETRANGE32, 0, 1000);
     mk(L"STATIC", L"Pronto. Confira sempre o cartão selecionado antes de gravar.", SS_LEFT | SS_ENDELLIPSIS | SS_NOPREFIX, 0, 0, MW, 18, ID_STATUS, 0);
-    mk(L"STATIC", L"", SS_OWNERDRAW, 0, 0, MW, 200, ID_RESULT, 0);
+    mk(L"STATIC", L"", SS_OWNERDRAW | WS_CLIPSIBLINGS, 0, 0, MW, 200, ID_RESULT, 0);
     HWND lg = mk(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP, 0, 0, MW, 200, ID_LOG, 0);
     SendMessageW(lg, EM_LIMITTEXT, 0x7FFFFFFE, 0);
     SendMessageW(lg, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(S(4), S(4)));
@@ -3791,7 +4239,136 @@ static void CreateUi(void) {
     static const int bids[] = {ID_OP0, ID_OP0 + 1, ID_OP0 + 2, ID_OP0 + 3, ID_OP0 + 4, ID_OP0 + 5, ID_OP0 + 6, ID_OP0 + 7, ID_OP0 + 8, ID_DETECT,
                                ID_REFRESH, ID_SHOWALL, ID_BROWSE, ID_CHK1, ID_CHK2, ID_RADA, ID_RADB, ID_START, ID_CANCELBTN, ID_NEXT, ID_LOGBTN, ID_OPTS, ID_EJECT};
     for (int i = 0; i < (int)(sizeof bids / sizeof bids[0]); i++) SetWindowSubclass(Ctl(bids[i]), BtnSub, bids[i], 0);
-    SetWindowSubclass(Ctl(ID_RESULT), ResSub, ID_RESULT, 0);
+    SetWindowSubclass(Ctl(ID_STEPS), StepsSub, ID_STEPS, 0);
+}
+
+/* ------------------------------------------------ modo demonstração (para prints e testes de tela)
+ * SDCloneTools.exe --demo=hero | busy | diag | diagbad | bench | auth
+ * Não lê nem grava nenhum disco: preenche a tela com dados de exemplo. */
+
+static void DemoUsage(Verdict *v) {
+    UsageStat *u = &v->us;
+    memset(u, 0, sizeof *u);
+    const uint64_t G = 1024ull * 1024 * 1024, M = 1024ull * 1024;
+    u->catBytes[CT_GAME] = 21 * G + 300 * M; u->catFiles[CT_GAME] = 1412;
+    u->catBytes[CT_SYS] = 3 * G + 200 * M; u->catFiles[CT_SYS] = 5230;
+    u->catBytes[CT_MUSIC] = 900 * M; u->catFiles[CT_MUSIC] = 212;
+    u->catBytes[CT_PHOTO] = 420 * M; u->catFiles[CT_PHOTO] = 860;
+    u->catBytes[CT_VIDEO] = 610 * M; u->catFiles[CT_VIDEO] = 14;
+    u->catBytes[CT_DOC] = 12 * M; u->catFiles[CT_DOC] = 96;
+    for (int c = 0; c < CT_N; c++) { u->usedBytes += u->catBytes[c]; u->files += u->catFiles[c]; }
+    u->dirs = 418;
+    u->hasRoms = u->hasEmu = u->hasLinux = 1;
+    u->scannedParts = 2;
+    u->scannedBytes = 59 * G;
+    static const struct { const char *e; uint32_t f; uint64_t b; int c; } ex[] = {
+        {"zip", 610, 9 * G, CT_GAME}, {"chd", 42, 6 * G, CT_GAME}, {"gba", 380, 3 * G, CT_GAME}, {"so", 812, G, CT_SYS},
+        {"mp3", 212, 900 * M, CT_MUSIC}, {"jpg", 860, 420 * M, CT_PHOTO}, {"sfc", 380, 400 * M, CT_GAME}, {"mp4", 14, 610 * M, CT_VIDEO}};
+    for (int i = 0; i < 8; i++) {
+        strcpy(u->ext[i].ext, ex[i].e);
+        u->ext[i].files = ex[i].f; u->ext[i].bytes = ex[i].b; u->ext[i].cat = ex[i].c;
+    }
+    u->next = 8;
+    v->usage = TRUE;
+    v->uCard = 63864569856ull;
+    v->uProfile = UP_CONSOLE;
+    VS(uTitle, L"%ls", ProfileTitle(UP_CONSOLE));
+    v->uFitLevel = 3;
+}
+
+static void SetupDemo(void) {
+    if (!g_demo[0]) return;
+    g_ndisks = 1;
+    DiskInfo *d = &g_disks[0];
+    memset(d, 0, sizeof *d);
+    d->index = 1; d->size = 63864569856ull; d->sec = 512; d->bus = 7; d->removable = TRUE; d->likelyCard = TRUE;
+    wcscpy(d->vendor, L"SanDisk"); wcscpy(d->product, L"Ultra microSDXC"); wcscpy(d->letters, L"E:");
+    wcscpy(d->label, L"Disco 1 — SanDisk Ultra microSDXC — 59,5 GB [USB] (E:)");
+    FillDiskCombo(ID_COMBO1, 1);
+    Verdict *v = &g_vd;
+    memset(v, 0, sizeof *v);
+    srand(7);
+    for (int i = 0; i < MAP_N; i++) v->cell[i] = (i % 23 == 5 || i > 110) ? MC_EMPTY : MC_DATA;
+    if (strcmp(g_demo, "hero") == 0) { ApplyOp(OP_DIAG); return; }
+    if (strcmp(g_demo, "busy") == 0) {
+        ApplyOp(OP_DIAG);
+        g_step = 3; g_mapDone = MAP_N;
+        SetPhaseText(L"Lendo o conteúdo — 4.812 arquivos, 301 pastas");
+        g_resView = TRUE;
+        SetBusy(TRUE);
+        Relayout();
+        SetTimer(g_hwnd, 1, 80, NULL);
+        return;
+    }
+    if (strcmp(g_demo, "diag") == 0 || strcmp(g_demo, "diagbad") == 0) {
+        BOOL bad = strcmp(g_demo, "diagbad") == 0;
+        v->op = OP_DIAG; v->map = TRUE;
+        for (int i = 0; i < MAP_N; i++) {
+            switch (v->cell[i]) { case MC_DATA: v->nData++; break; default: v->nEmpty++; }
+        }
+        DemoUsage(v);
+        if (bad) {
+            v->level = 2; v->next = NX_BACKUP; v->hRead = 0; v->hWrite = 2; v->hPart = 0;
+            VS(title, L"Cartão travado em somente leitura");
+            VS(todo, L"Faça um backup (imagem) do cartão e recupere os arquivos a partir da imagem.");
+            v->uFitLevel = 2;
+        } else {
+            v->level = 0; v->next = NX_AUTH;
+            VS(title, L"Nenhum defeito encontrado");
+            g_jdisk = 1; g_jdone[0] = TRUE;
+        }
+        v->valid = TRUE;
+        ApplyOp(OP_DIAG);
+        return;
+    }
+    if (strcmp(g_demo, "bench") == 0) {
+        g_jdisk = 1; g_jdone[0] = g_jdone[1] = g_jdone[2] = TRUE;
+        v->op = OP_BENCH; v->bench = TRUE;
+        BenchRes *br = &v->br;
+        br->seqR = 87.4; br->seqW = 41.2; br->rMin = 84; br->rMax = 90; br->wMed = 42; br->wMin = 30; br->rr = 1850; br->rw = 610; br->hasW = 1;
+        BenchEval(br, &v->bj);
+        for (int i = 0; i < 36; i++) v->curveR[i] = (float)(85 + (rand() % 60) / 10.0);
+        v->nCurveR = 36;
+        for (int i = 0; i < 16; i++) v->curveW[i] = (float)(38 + (rand() % 80) / 10.0);
+        v->nCurveW = 16;
+        VS(title, L"Bom para game stick, fotos e vídeo 4K");
+        VS(cause, L"Leitura sequencial: 87,4 MB/s. Gravação sequencial: 41,2 MB/s (janela mais lenta: 30,0 MB/s).");
+        VS(card, L"Leitura: 1850 operações/s (bom). Gravação: 610 operações/s (bom).");
+        VS(data, L"Pela gravação sequencial, equivale a U3 / V30. Medido neste leitor: um leitor lento mostra menos do que o cartão entrega.");
+        VS(todo, L"Game stick: bom. Foto e vídeo: fotos e vídeo até 4K. Confiança no cartão: boa.");
+        v->valid = TRUE;
+        ApplyOp(OP_BENCH);
+        g_resView = TRUE;
+        Relayout();
+        ShowArea();
+        return;
+    }
+    if (strcmp(g_demo, "auth") == 0) { g_jdisk = 1; g_jdone[0] = TRUE; ApplyOp(OP_AUTH); return; }
+}
+
+/* cartão novo conectado: seleciona e volta para a tela inicial do Diagnóstico */
+static void OnDisksChanged(void) {
+    static int known[32], nknown = -1;
+    int fresh = -1;
+    if (nknown >= 0)
+        for (int i = 0; i < g_ndisks; i++) {
+            BOOL seen = FALSE;
+            for (int k = 0; k < nknown; k++) if (known[k] == g_disks[i].index) seen = TRUE;
+            if (!seen) fresh = g_disks[i].index;
+        }
+    nknown = 0;
+    for (int i = 0; i < g_ndisks && i < 32; i++) known[nknown++] = g_disks[i].index;
+    if (fresh < 0 || g_busy) { ShowArea(); return; }
+    HWND c = Ctl(ID_COMBO1);
+    int n = (int)SendMessageW(c, CB_GETCOUNT, 0, 0);
+    for (int i = 0; i < n; i++)
+        if ((int)SendMessageW(c, CB_GETITEMDATA, i, 0) == fresh) SendMessageW(c, CB_SETCURSEL, i, 0);
+    g_vd.valid = FALSE;
+    g_showLog = FALSE;
+    g_diagForm = FALSE;
+    if (g_op != OP_DIAG) ApplyOp(OP_DIAG);
+    else ShowArea();
+    FlashWindow(g_hwnd, TRUE);
 }
 
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -3801,6 +4378,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         CreateUi();
         RefreshDisks();
         ApplyOp(OP_DIAG);
+        OnDisksChanged();
+        SetupDemo();
         Log(L"Pronto. Escolha o cartão e a tarefa no menu à esquerda.");
         return 0;
     case WM_COMMAND: {
@@ -3808,6 +4387,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id >= ID_OP0 && id < ID_OP0 + OP_COUNT && code == BN_CLICKED) { if (!g_busy) ApplyOp(id - ID_OP0); }
         else if (id == ID_REFRESH && code == BN_CLICKED) { if (!g_busy) RefreshDisks(); }
         else if (id == ID_EJECT && code == BN_CLICKED) { if (!g_busy) DoEject(); }
+        else if (id == ID_COMBO1 && code == CBN_SELCHANGE) {
+            if (!g_busy && IS_VIEW(g_op) && g_op != OP_CSD) { g_vd.valid = FALSE; g_showLog = FALSE; }
+            ShowArea();
+        }
         else if (id == ID_SHOWALL && code == BN_CLICKED) { if (!g_busy) { SetChk(ID_SHOWALL, !Checked(ID_SHOWALL)); RefreshDisks(); } }
         else if (id == ID_BROWSE && code == BN_CLICKED) OnBrowse();
         else if (id == ID_COMBOB && code == CBN_SELCHANGE) { if (g_op == OP_RECOVER) RecoverUi(); }
@@ -3819,7 +4402,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         else if (id == ID_START && code == BN_CLICKED) OnStart();
         else if (id == ID_NEXT && code == BN_CLICKED) { if (!g_busy) OnNext(); }
         else if (id == ID_LOGBTN && code == BN_CLICKED) { g_showLog = !g_showLog; ShowArea(); }
-        else if (id == ID_OPTS && code == BN_CLICKED) { if (!g_busy) ApplyOp(g_op); }
+        else if (id == ID_OPTS && code == BN_CLICKED) { if (!g_busy) { if (g_op == OP_DIAG) g_diagForm = TRUE; ApplyOp(g_op); } }
         else if (id == ID_DETECT && code == BN_CLICKED) {
             if (!g_busy) {
                 FillPorts();
@@ -3864,6 +4447,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (d->CtlID == ID_HEADER) DrawSidebar(d);
             else if (d->CtlID == ID_WARN) DrawWarn(d);
             else if (d->CtlID == ID_RESULT) DrawResult(d);
+            else if (d->CtlID == ID_STEPS) DrawSteps(d);
         }
         return TRUE;
     }
@@ -3894,8 +4478,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return (LRESULT)br;
     }
     case WM_TIMER:
-        if (w == 1) UpdateProgress();
-        else if (w == 2) { KillTimer(h, 2); if (!g_busy) { RefreshDisks(); if (g_op == OP_CSD) FillPorts(); } }
+        if (w == 1) { UpdateProgress(); if (IS_VIEW(g_op)) InvalidateRect(Ctl(ID_RESULT), NULL, FALSE); }
+        else if (w == 2) { KillTimer(h, 2); if (!g_busy && !g_demo[0]) { RefreshDisks(); OnDisksChanged(); if (g_op == OP_CSD) FillPorts(); } }
         return 0;
     case WM_DEVICECHANGE:
         if (!g_busy && (w == DBT_DEVNODES_CHANGED)) SetTimer(h, 2, 1200, NULL);
@@ -3926,8 +4510,12 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show) {
-    (void)hp; (void)cmd;
+    (void)hp;
     g_inst = hi;
+    if (cmd) {
+        const char *dm = strstr(cmd, "--demo=");
+        if (dm) { strncpy(g_demo, dm + 7, sizeof g_demo - 1); for (char *c = g_demo; *c; c++) if (*c == ' ') *c = 0; }
+    }
     InitializeCriticalSection(&g_cs);
     INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS | ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&icc);

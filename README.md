@@ -24,6 +24,15 @@ O menu à esquerda tem as funções; a área à direita mostra a tarefa e, no fi
 
 ![Veredito do Diagnóstico](docs/img/diagnostico-veredito.png)
 
+## Como usar (a jornada)
+
+1. Abra o app. A tela inicial já mostra o cartão encontrado e o botão **Iniciar diagnóstico** (com mais de um cartão, escolha na lista). Conectou outro cartão? O app seleciona ele sozinho.
+2. Durante a análise, a tela mostra cada etapa sendo feita e o mapa de leitura se preenchendo.
+3. O resultado vem numa página só: **saúde** (escudo verde, laranja ou vermelho, com leitura, gravação e partições) e **conteúdo** (gráfico de rosca com o que tem dentro, tipo de uso e se o cartão serve para ele).
+4. O botão **Próximo** leva ao passo seguinte: **Autenticidade** e depois **Desempenho**. A trilha no topo marca o que já foi feito. Se o cartão tiver defeito, o próximo passo vira backup ou reparo.
+
+Para ver as telas sem mexer em nenhum cartão: `SDCloneTools.exe --demo=hero` (também `busy`, `diag`, `diagbad`, `bench`, `auth`).
+
 ## O que faz
 
 | Função | Para que serve |
