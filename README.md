@@ -86,7 +86,7 @@ Como no Acronis, a cópia é feita **partição por partição, só com os bloco
 
 - **FAT16/FAT32, exFAT e ext2/3/4** (Linux dos consoles): o app lê o mapa de blocos usados de cada partição e copia só eles. Partições de outro tipo (NTFS, desconhecidas) vão inteiras.
 - A área antes da primeira partição (tabela e **carregador de boot** dos consoles, como o do R36S) e os pequenos espaços entre partições vão sempre.
-- **Destino menor**: a última partição é reduzida para caber, sem mover dados, desde que todos os dados usados caibam (FAT16, FAT32 e exFAT, que é o caso da partição de ROMs). A tabela MBR ou GPT é ajustada. Se não couber, o app diz o tamanho mínimo e não grava nada. Partição Linux (ext4) no fim não pode ser reduzida, e o app explica.
+- **Destino menor**: a última partição é reduzida para caber, desde que todos os dados usados caibam (FAT16, FAT32 e exFAT, que é o caso da partição de ROMs). Se os dados estiverem espalhados até o fim da partição, o app **compacta**: move os dados do fim para os espaços livres do começo e ajusta a tabela de arquivos, como o Acronis. A tabela MBR ou GPT é ajustada. Se não couber, o app diz o tamanho mínimo e não grava nada. Partição Linux (ext4) no fim não pode ser reduzida, e o app explica.
 - **Backup em `.vhd` dinâmico**: só os blocos gravados ocupam espaço no arquivo. O Windows abre o `.vhd` com dois cliques (Montar) para você ver os arquivos, e o **Gravar imagem** devolve ele a um cartão do mesmo tamanho, maior ou menor.
 - Com **Conferir** marcado, tudo o que foi gravado é relido e comparado com a origem.
 

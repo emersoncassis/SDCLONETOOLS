@@ -104,10 +104,10 @@ Grava `.vhd`, `.img`, `.iso` ou `.bin` no cartão. **Apaga o conteúdo do cartã
 ### Clonar cartão
 Copia um cartão direto em outro. **Apaga todo o conteúdo do destino.** Escolha o modo:
 
-- **Inteligente** (padrão): copia partição por partição, só os dados usados. Funciona em cartão **menor**: 64 GB com 25 GB usados cabe num cartão de 32 GB. A última partição é reduzida para caber (FAT16, FAT32 ou exFAT, como a partição de ROMs dos consoles), sem mover dados, e a tabela MBR ou GPT é ajustada. O carregador de boot que fica antes da primeira partição é copiado junto.
+- **Inteligente** (padrão): copia partição por partição, só os dados usados. Funciona em cartão **menor**: 64 GB com 25 GB usados cabe num cartão de 32 GB. A última partição é reduzida para caber (FAT16, FAT32 ou exFAT, como a partição de ROMs dos consoles). Se os dados estiverem espalhados até o fim da partição, o app os **compacta**: move os dados do fim para os espaços livres do começo e ajusta a tabela de arquivos (o log mostra quanto foi movido). A tabela MBR ou GPT é ajustada. O carregador de boot que fica antes da primeira partição é copiado junto.
 - **Setor a setor**: cópia exata, o destino precisa ser do mesmo tamanho ou maior.
 
-Quando a cópia inteligente não é possível, o app explica e não grava nada: dados espalhados até o fim da partição (o app mostra o tamanho mínimo), última partição Linux (ext4) ou NTFS (não dá para reduzir), ou cartão sem tabela de partições (use setor a setor).
+Quando a cópia inteligente não é possível, o app explica e não grava nada: dados usados maiores que o destino (o app mostra o tamanho mínimo), última partição Linux (ext4) ou NTFS (não dá para reduzir), ou cartão sem tabela de partições (use setor a setor).
 
 ![Clonar cartão](img/tela-clone.png)
 

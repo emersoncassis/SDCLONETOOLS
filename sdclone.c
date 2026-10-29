@@ -3493,6 +3493,23 @@ static const wchar_t *FsShort(int t) {
     return L"outro tipo";
 }
 
+/* conteúdo esperado do destino em [off, off+n): o que veio de outro lugar (movimentos) e depois os ajustes (patches) */
+static void SmOverlay(const SmPlan *p, SmSrc *src, uint8_t *a, uint64_t off, uint32_t n, BOOL withMoves) {
+    if (withMoves)
+        for (int k = 0; k < p->nmv; k++) {
+            uint64_t ms = p->mv[k].dst, me = ms + p->mv[k].len;
+            if (me <= off || ms >= off + n) continue;
+            uint64_t s0 = ms > off ? ms : off, e0 = me < off + n ? me : off + n;
+            SmSrcRd(src, p->mv[k].src + (s0 - ms), a + (s0 - off), (uint32_t)(e0 - s0));
+        }
+    for (int k = 0; k < p->npatch; k++) {
+        uint64_t ps = p->patch[k].off, pe = ps + p->patch[k].len;
+        if (pe <= off || ps >= off + n) continue;
+        uint64_t s0 = ps > off ? ps : off, e0 = pe < off + n ? pe : off + n;
+        memcpy(a + (s0 - off), p->patch[k].data + (s0 - ps), (size_t)(e0 - s0));
+    }
+}
+
 /* confere o que foi gravado: relê a origem (com os ajustes aplicados) e o destino */
 static BOOL SmVerify(const SmPlan *p, SmSrc *src, int (*drd)(void *, uint64_t, void *, uint32_t), void *dctx) {
     uint8_t *a = (uint8_t *)ALLOC_ALIGNED(SM_CHUNK), *b = (uint8_t *)ALLOC_ALIGNED(SM_CHUNK);
@@ -3505,15 +3522,25 @@ static BOOL SmVerify(const SmPlan *p, SmSrc *src, int (*drd)(void *, uint64_t, v
             if (g_cancel) { ok = FALSE; break; }
             uint32_t n = left > SM_CHUNK ? SM_CHUNK : (uint32_t)left;
             if (!SmSrcRd(src, off, a, n)) { off += n; left -= n; continue; } /* setor ilegível na origem: não dá para comparar */
-            for (int k = 0; k < p->npatch; k++) {
-                uint64_t ps = p->patch[k].off, pe = ps + p->patch[k].len;
-                if (pe <= off || ps >= off + n) continue;
-                uint64_t s0 = ps > off ? ps : off, e0 = pe < off + n ? pe : off + n;
-                memcpy(a + (s0 - off), p->patch[k].data + (s0 - ps), (size_t)(e0 - s0));
-            }
+            SmOverlay(p, src, a, off, n, TRUE);
             if (!drd(dctx, off, b, n)) { LogErr(L"ler o destino para conferir"); ok = FALSE; break; }
             if (memcmp(a, b, n) != 0) diff++;
             off += n; left -= n; done += n;
+            g_done = (LONGLONG)done;
+        }
+    }
+    /* trechos movidos pela compactação: o destino deve ter o conteúdo que veio de outro lugar da origem */
+    for (int i = 0; ok && i < p->nmv; i++) {
+        uint64_t so = p->mv[i].src, dofs = p->mv[i].dst, left = p->mv[i].len;
+        while (ok && left) {
+            if (g_cancel) { ok = FALSE; break; }
+            uint32_t n = left > SM_CHUNK ? SM_CHUNK : (uint32_t)left;
+            if (SmSrcRd(src, so, a, n)) {
+                SmOverlay(p, src, a, dofs, n, FALSE);
+                if (!drd(dctx, dofs, b, n)) { LogErr(L"ler o destino para conferir"); ok = FALSE; break; }
+                if (memcmp(a, b, n) != 0) diff++;
+            }
+            so += n; dofs += n; left -= n; done += n;
             g_done = (LONGLONG)done;
         }
     }
@@ -3591,6 +3618,10 @@ static BOOL DoSmart(Job *j, int srcKind, BOOL dstVhd) {
         if (s->newSize != s->size) {
             FmtSize(s->newSize, c, 32);
             Log(L"  Partição %d (%ls, %ls): %ls usados — será reduzida para %ls.", i + 1, FsShort(s->fs), a, b, c);
+            if (p->compacted && i == p->nparts - 1) {
+                FmtSize(p->moveBytes, c, 32);
+                Log(L"    Compactação: %ls de dados do fim da partição serão movidos para os espaços livres do começo (a tabela de arquivos é ajustada).", c);
+            }
         } else Log(L"  Partição %d (%ls, %ls): %ls %ls.", i + 1, FsShort(s->fs), a, s->how == SMH_WHOLE ? L"copiada inteira (tipo sem mapa de blocos):" : L"usados,", b);
     }
     FmtSize(p->copyBytes, a, 32);

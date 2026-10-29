@@ -30,6 +30,7 @@ int main(int argc, char **argv) {
     if (!SmBuildPlan(&d, dsize, &p, NULL, NULL)) { printf("PLANO RECUSADO: %s\n", p.err); return 3; }
     printf("tabela=%d partições=%d copiar=%llu MB de %llu MB, reduzida=%d, mínimo=%llu MB, patches=%d\n", p.table, p.nparts,
            (unsigned long long)(p.copyBytes >> 20), (unsigned long long)(ssize >> 20), p.shrunk, (unsigned long long)(p.needBytes >> 20), p.npatch);
+    if (p.compacted) printf("compactado: %d trechos movidos, %llu MB\n", p.nmv, (unsigned long long)(p.moveBytes >> 20));
     for (int i = 0; i < p.nparts; i++) printf("  p%d início=%llu MB tam=%llu MB novo=%llu MB fs=%d usado=%llu MB fimUsado=%llu MB modo=%d\n", i + 1,
         (unsigned long long)(p.part[i].start >> 20), (unsigned long long)(p.part[i].size >> 20), (unsigned long long)(p.part[i].newSize >> 20), p.part[i].fs,
         (unsigned long long)(p.part[i].used >> 20), (unsigned long long)(p.part[i].usedEnd >> 20), p.part[i].how);
